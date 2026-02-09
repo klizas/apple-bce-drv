@@ -39,6 +39,7 @@ struct bce_queue_sq {
     dma_addr_t dma_handle;
     void *data;
     void *userdata;
+    struct apple_bce_device *dev;
     void __iomem *reg_mem_dma;
 
     atomic_t available_commands;

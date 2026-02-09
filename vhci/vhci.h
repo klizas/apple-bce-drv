@@ -37,7 +37,9 @@ struct bce_vhci {
     struct bce_vhci_device *devices[16];
     struct workqueue_struct *tq_state_wq;
     struct work_struct w_fw_events;
-    unsigned long port_resume_mask;  /* Ports needing re-enumeration after resume (accessed atomically) */
+    unsigned long port_resume_mask;        /* Ports with connection change (accessed atomically) */
+    unsigned long port_reenumerate_mask;   /* Ports where GetPortStatus hides CONNECTION to force disconnect+re-enum */
+    unsigned long port_suppress_connect_mask; /* Ports where PORT_CONNECT events are suppressed during session refresh */
 };
 
 int __init bce_vhci_module_init(void);

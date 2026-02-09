@@ -83,6 +83,7 @@ int __bce_vhci_event_queue_create(struct bce_vhci *vhci, struct bce_vhci_event_q
         return -EINVAL;
     }
 
+    ret->draining = false;
     init_completion(&ret->queue_empty_completion);
     bce_vhci_event_queue_submit_pending(ret, VHCI_EVENT_PENDING_COUNT);
     return 0;
@@ -123,7 +124,8 @@ static void bce_vhci_event_queue_completion(struct bce_queue_sq *sq)
         bce_notify_submission_complete(sq);
         ++cnt;
     }
-    bce_vhci_event_queue_submit_pending(ev, cnt);
+    if (!READ_ONCE(ev->draining))
+        bce_vhci_event_queue_submit_pending(ev, cnt);
     if (atomic_read(&sq->available_commands) == sq->el_count - 1)
         complete(&ev->queue_empty_completion);
 }
@@ -149,6 +151,7 @@ void bce_vhci_event_queue_pause(struct bce_vhci_event_queue *q)
 {
     unsigned long timeout;
     reinit_completion(&q->queue_empty_completion);
+    WRITE_ONCE(q->draining, true);
     if (bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, q->sq->qid))
         pr_warn("bce-vhci: failed to flush event queue\n");
     timeout = msecs_to_jiffies(5000);
@@ -159,6 +162,7 @@ void bce_vhci_event_queue_pause(struct bce_vhci_event_queue *q)
             break;
         }
     }
+    WRITE_ONCE(q->draining, false);
 }
 
 void bce_vhci_event_queue_resume(struct bce_vhci_event_queue *q)

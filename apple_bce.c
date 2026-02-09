@@ -360,6 +360,11 @@ static int apple_bce_suspend(struct device *dev)
     if ((status = bce_save_state_and_sleep(bce)))
         return status;
 
+    /* Disable DMA IRQ after T2 is asleep. On resume, PCI core powers the
+     * device back on before apple_bce_resume() runs — the disabled IRQ
+     * prevents stale completion processing during that transition window. */
+    disable_irq(pci_irq_vector(bce->pci, 4));
+
     return 0;
 }
 
@@ -370,6 +375,9 @@ static int apple_bce_resume(struct device *dev)
     int i;
     u16 vid;
 
+    /* Mark resume in progress - gates MMIO safety checks in bce_submit_to_device() */
+    atomic_set(&bce->resuming, 1);
+
     /* Wait for T2 PCIe link to re-train after S3.
      * MMIO to the T2 BARs will hang the CPU if the link is down.
      * Config space reads go through the root port and return 0xFFFF safely.
@@ -379,20 +387,36 @@ static int apple_bce_resume(struct device *dev)
         pci_read_config_word(bce->pci, PCI_VENDOR_ID, &vid);
         if (vid == PCI_VENDOR_ID_APPLE)
             break;
-        msleep(i < 40 ? 5 : 50);
+        if (i < 40)
+            usleep_range(2000, 3000);
+        else
+            msleep(50);
     }
     if (vid != PCI_VENDOR_ID_APPLE) {
         pr_err("apple-bce: resume: T2 not accessible after timeout (vid=0x%04x)\n", vid);
+        atomic_set(&bce->resuming, 0);
+        enable_irq(pci_irq_vector(bce->pci, 4));
         return -ENODEV;
     }
 
     pci_set_master(bce->pci);
     pci_set_master(bce->pci0);
 
-    if ((status = bce_restore_state_and_wake(bce)))
+    if ((status = bce_restore_state_and_wake(bce))) {
+        atomic_set(&bce->resuming, 0);
+        enable_irq(pci_irq_vector(bce->pci, 4));
         return status;
+    }
 
     bce_timestamp_start(&bce->timestamp, false);
+
+    /* Re-enable DMA IRQ now that T2 state is restored and bus mastering is on. */
+    enable_irq(pci_irq_vector(bce->pci, 4));
+
+    /* Clear the resuming gate — T2 link is verified and IRQ is re-enabled,
+     * so doorbell writes are safe again. VHCI-level state restoration
+     * happens later in bus_resume, but doorbells are safe from this point. */
+    atomic_set(&bce->resuming, 0);
 
     return 0;
 }

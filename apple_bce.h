@@ -29,6 +29,7 @@ struct apple_bce_device {
     struct bce_queue_cmdq *cmd_cmdq;
     struct bce_queue_sq *int_sq_list[BCE_MAX_QUEUE_COUNT];
     bool is_being_removed;
+    atomic_t resuming;  /* Set during resume window to gate MMIO safety checks */
 
     dma_addr_t saved_data_dma_addr;
     void *saved_data_dma_ptr;

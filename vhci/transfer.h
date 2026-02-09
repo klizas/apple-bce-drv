@@ -43,6 +43,9 @@ struct bce_vhci_transfer_queue {
     atomic_t sq_out_pending;
 
     struct work_struct w_reset;
+    struct work_struct w_resume;
+    struct work_struct w_pause;
+    bool needs_pause;
 };
 enum bce_vhci_urb_state {
     BCE_VHCI_URB_INIT_PENDING,
@@ -75,7 +78,7 @@ int bce_vhci_transfer_queue_pause(struct bce_vhci_transfer_queue *q, enum bce_vh
 int bce_vhci_transfer_queue_resume(struct bce_vhci_transfer_queue *q, enum bce_vhci_pause_source src);
 void bce_vhci_transfer_queue_request_reset(struct bce_vhci_transfer_queue *q);
 
-int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb);
+int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb, gfp_t mem_flags);
 int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *urb, int status);
 
 #endif //BCEDRIVER_TRANSFER_H

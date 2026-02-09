@@ -9,10 +9,13 @@ static void bce_vhci_transfer_queue_giveback(struct bce_vhci_transfer_queue *q);
 static void bce_vhci_transfer_queue_remove_pending(struct bce_vhci_transfer_queue *q);
 
 static int bce_vhci_urb_init(struct bce_vhci_urb *vurb);
+static void bce_vhci_urb_complete(struct bce_vhci_urb *urb, int status);
 static int bce_vhci_urb_update(struct bce_vhci_urb *urb, struct bce_vhci_message *msg);
 static int bce_vhci_urb_transfer_completion(struct bce_vhci_urb *urb, struct bce_sq_completion_data *c);
 
 static void bce_vhci_transfer_queue_reset_w(struct work_struct *work);
+static void bce_vhci_transfer_queue_deferred_resume_w(struct work_struct *work);
+static void bce_vhci_transfer_queue_deferred_pause_w(struct work_struct *work);
 
 void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transfer_queue *q,
         struct usb_host_endpoint *endp, bce_vhci_device_t dev_addr, enum dma_data_direction dir)
@@ -31,6 +34,7 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
     q->endp_addr = (u8) (endp->desc.bEndpointAddress & 0x8F);
     q->state = BCE_VHCI_ENDPOINT_ACTIVE;
     q->active = true;
+    q->paused_by = 0;
     q->stalled = false;
     q->max_active_requests = 1;
     if (usb_endpoint_type(&endp->desc) == USB_ENDPOINT_XFER_BULK)
@@ -38,6 +42,9 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
     q->remaining_active_requests = q->max_active_requests;
     q->cq = bce_create_cq(vhci->dev, 0x100);
     INIT_WORK(&q->w_reset, bce_vhci_transfer_queue_reset_w);
+    INIT_WORK(&q->w_resume, bce_vhci_transfer_queue_deferred_resume_w);
+    INIT_WORK(&q->w_pause, bce_vhci_transfer_queue_deferred_pause_w);
+    WRITE_ONCE(q->needs_pause, false);
     q->sq_in = NULL;
     if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) {
         snprintf(name, sizeof(name), "VHC1-%i-%02x", dev_addr, 0x80 | usb_endpoint_num(&endp->desc));
@@ -54,6 +61,9 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
 
 void bce_vhci_destroy_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transfer_queue *q)
 {
+    cancel_work_sync(&q->w_pause);
+    cancel_work_sync(&q->w_resume);
+    cancel_work_sync(&q->w_reset);
     bce_vhci_transfer_queue_giveback(q);
     bce_vhci_transfer_queue_remove_pending(q);
     if (q->sq_in)
@@ -71,7 +81,11 @@ static inline bool bce_vhci_transfer_queue_can_init_urb(struct bce_vhci_transfer
 static void bce_vhci_transfer_queue_defer_event(struct bce_vhci_transfer_queue *q, struct bce_vhci_message *msg)
 {
     struct bce_vhci_list_message *lm;
-    lm = kmalloc(sizeof(struct bce_vhci_list_message), GFP_KERNEL);
+    lm = kmalloc(sizeof(struct bce_vhci_list_message), GFP_ATOMIC);
+    if (!lm) {
+        pr_err("bce-vhci: [%02x] failed to allocate deferred event, dropping\n", q->endp_addr);
+        return;
+    }
     INIT_LIST_HEAD(&lm->list);
     lm->msg = *msg;
     list_add_tail(&lm->list, &q->evq);
@@ -203,8 +217,10 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
     bce_vhci_transfer_queue_giveback(q);
 }
 
-/* Timeout for waiting on pending output requests during pause */
-#define BCE_VHCI_PAUSE_TIMEOUT_MS 2000
+/* Timeout for waiting on pending output requests during pause.
+ * Keep short — multiple endpoints timeout sequentially behind
+ * cq->mutex, so per-endpoint timeouts compound into apparent freezes. */
+#define BCE_VHCI_PAUSE_TIMEOUT_MS 1000
 
 int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
 {
@@ -213,23 +229,18 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
     int pending;
     long timeout;
 
-    pr_info("bce-vhci: [%02x] pause: starting (dev=%d)\n", q->endp_addr, q->dev_addr);
+    pr_debug("bce-vhci: [%02x] pause (dev=%d)\n", q->endp_addr, q->dev_addr);
 
     spin_lock_irqsave(&q->urb_lock, flags);
     q->active = false;
     spin_unlock_irqrestore(&q->urb_lock, flags);
     bce_vhci_transfer_queue_remove_pending(q);
 
-    /*
-     * Wait for pending output transfers to COMPLETE before pausing/flushing.
-     * This ensures commands like keyboard backlight off actually reach the T2
-     * before we abort remaining transfers. Without this, the backlight command
-     * gets aborted by flush and the keyboard stays lit during suspend.
-     */
+    /* Wait for pending output transfers to complete before pausing/flushing.
+     * Ensures commands like keyboard backlight off reach T2 before flush
+     * aborts remaining transfers. */
     if (q->sq_out) {
         pending = atomic_read(&q->sq_out_pending);
-        pr_info("bce-vhci: [%02x] pause: %d pending outputs, waiting for completion\n",
-                q->endp_addr, pending);
         if (pending > 0) {
             timeout = wait_event_timeout(q->sq_out_wait_queue,
                     atomic_read(&q->sq_out_pending) == 0,
@@ -237,18 +248,15 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
             if (timeout == 0) {
                 pending = atomic_read(&q->sq_out_pending);
                 if (pending > 0)
-                    pr_warn("bce-vhci: [%02x] pause: TIMEOUT waiting for %d pending outputs\n",
+                    pr_warn("bce-vhci: [%02x] pause: timeout waiting for %d pending outputs\n",
                             q->endp_addr, pending);
-            } else {
-                pr_info("bce-vhci: [%02x] pause: pending outputs completed\n", q->endp_addr);
             }
         }
     }
 
-    pr_info("bce-vhci: [%02x] pause: setting endpoint state to PAUSED\n", q->endp_addr);
     if ((status = bce_vhci_cmd_endpoint_set_state(
             &q->vhci->cq, q->dev_addr, q->endp_addr, BCE_VHCI_ENDPOINT_PAUSED, &q->state))) {
-        pr_err("bce-vhci: [%02x] pause: set_state failed with %d\n", q->endp_addr, status);
+        pr_err("bce-vhci: [%02x] pause: set_state failed (%d)\n", q->endp_addr, status);
         return status;
     }
     if (q->state != BCE_VHCI_ENDPOINT_PAUSED) {
@@ -256,14 +264,11 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
         return -EINVAL;
     }
 
-    pr_info("bce-vhci: [%02x] pause: flushing queues\n", q->endp_addr);
     if (q->sq_in)
         bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, (u16) q->sq_in->qid);
-
     if (q->sq_out)
         bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, (u16) q->sq_out->qid);
 
-    pr_info("bce-vhci: [%02x] pause: done\n", q->endp_addr);
     return 0;
 }
 
@@ -360,6 +365,26 @@ void bce_vhci_transfer_queue_request_reset(struct bce_vhci_transfer_queue *q)
     queue_work(q->vhci->tq_state_wq, &q->w_reset);
 }
 
+static void bce_vhci_transfer_queue_deferred_resume_w(struct work_struct *work)
+{
+    struct bce_vhci_transfer_queue *q =
+        container_of(work, struct bce_vhci_transfer_queue, w_resume);
+    bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+}
+
+static void bce_vhci_transfer_queue_deferred_pause_w(struct work_struct *work)
+{
+    struct bce_vhci_transfer_queue *q =
+        container_of(work, struct bce_vhci_transfer_queue, w_pause);
+
+    /* Check needs_pause — if cleared by destroy/refresh, skip the pause */
+    if (!READ_ONCE(q->needs_pause))
+        return;
+    WRITE_ONCE(q->needs_pause, false);
+
+    bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+}
+
 static void bce_vhci_transfer_queue_init_pending_urbs(struct bce_vhci_transfer_queue *q)
 {
     struct urb *urb, *urbt;
@@ -377,12 +402,23 @@ static void bce_vhci_transfer_queue_init_pending_urbs(struct bce_vhci_transfer_q
 
 static int bce_vhci_urb_data_start(struct bce_vhci_urb *urb, unsigned long *timeout);
 
-int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb)
+int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb, gfp_t mem_flags)
 {
     unsigned long flags;
     int status = 0;
     struct bce_vhci_urb *vurb;
-    vurb = kzalloc(sizeof(struct bce_vhci_urb), GFP_KERNEL);
+
+    /*
+     * Defer resume if queue was left paused from a previous URB cancel.
+     * Cannot resume synchronously because urb_enqueue may be called from
+     * atomic context (e.g. hid_start_in holds usbhid->lock spinlock).
+     */
+    if (READ_ONCE(q->paused_by) & BCE_VHCI_PAUSE_INTERNAL_WQ)
+        queue_work(q->vhci->tq_state_wq, &q->w_resume);
+
+    vurb = kzalloc(sizeof(struct bce_vhci_urb), mem_flags);
+    if (!vurb)
+        return -ENOMEM;
     urb->hcpriv = vurb;
 
     vurb->q = q;
@@ -483,25 +519,27 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
 
     vurb->state = BCE_VHCI_URB_CANCELLED;
 
-    /* If the URB wasn't posted to the device yet, we can still remove it on the host without pausing the queue. */
+    /* If the URB was already posted to T2, we need to pause the endpoint
+     * so T2 stops processing it. Defer the pause to the workqueue to avoid
+     * blocking the caller — T2 command timeouts can take seconds per
+     * endpoint, and multiple cancels compound into apparent system freezes. */
     if (old_state != BCE_VHCI_URB_INIT_PENDING) {
-        pr_debug("bce-vhci: [%02x] Cancelling URB\n", q->endp_addr);
-
-        spin_unlock_irqrestore(&q->urb_lock, flags);
-        bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
-        spin_lock_irqsave(&q->urb_lock, flags);
-
+        pr_debug("bce-vhci: [%02x] Cancelling URB (deferring pause)\n", q->endp_addr);
+        WRITE_ONCE(q->needs_pause, true);
         ++q->remaining_active_requests;
     }
 
     usb_hcd_unlink_urb_from_ep(q->vhci->hcd, urb);
+    urb->hcpriv = NULL;
 
     spin_unlock_irqrestore(&q->urb_lock, flags);
 
-    usb_hcd_giveback_urb(q->vhci->hcd, urb, status);
-
+    /* Schedule the deferred pause BEFORE giveback — after giveback, USB core
+     * could tear down the device from another CPU, freeing q. */
     if (old_state != BCE_VHCI_URB_INIT_PENDING)
-        bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+        queue_work(q->vhci->tq_state_wq, &q->w_pause);
+
+    usb_hcd_giveback_urb(q->vhci->hcd, urb, status);
 
     kfree(vurb);
 

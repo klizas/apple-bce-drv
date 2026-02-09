@@ -42,6 +42,7 @@ struct bce_vhci_event_queue {
     dma_addr_t dma_addr;
     bce_vhci_event_queue_callback cb;
     struct completion queue_empty_completion;
+    bool draining;
 };
 struct bce_vhci_command_queue_completion {
     struct bce_vhci_message *result;

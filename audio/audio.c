@@ -176,6 +176,32 @@ static void aaudio_remove(struct pci_dev *dev)
 static int aaudio_suspend(struct device *dev)
 {
     struct aaudio_device *aaudio = pci_get_drvdata(to_pci_dev(dev));
+    struct aaudio_subdevice *sdev;
+    size_t i;
+
+    /* Stop running streams and tell ALSA they are suspended.  Without this,
+     * ALSA keeps polling aaudio_pcm_pointer() after resume while
+     * remote_timestamp is stale, producing wildly wrong position values
+     * ("invalid position" errors). */
+    list_for_each_entry(sdev, &aaudio->subdevice_list, list) {
+        bool stopped_io = false;
+        for (i = 0; i < sdev->out_stream_cnt; i++) {
+            if (sdev->out_streams[i].started) {
+                stopped_io = true;
+                sdev->out_streams[i].started = 0;
+            }
+        }
+        for (i = 0; i < sdev->in_stream_cnt; i++) {
+            if (sdev->in_streams[i].started) {
+                stopped_io = true;
+                sdev->in_streams[i].started = 0;
+            }
+        }
+        if (stopped_io)
+            aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
+        if (sdev->pcm)
+            snd_pcm_suspend_all(sdev->pcm);
+    }
 
     if (aaudio_cmd_set_remote_access(aaudio, AAUDIO_REMOTE_ACCESS_OFF))
         dev_warn(aaudio->dev, "Failed to reset remote access\n");
