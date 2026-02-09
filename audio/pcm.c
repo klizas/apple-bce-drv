@@ -89,8 +89,8 @@ int aaudio_create_hw_info(struct aaudio_apple_description *desc, struct snd_pcm_
     alsa_hw->channels_max = desc->channels_per_frame;
     alsa_hw->buffer_bytes_max = buf_size;
     alsa_hw->period_bytes_min = desc->bytes_per_packet;
-    alsa_hw->period_bytes_max = desc->bytes_per_packet;
-    alsa_hw->periods_min = (uint) (buf_size / desc->bytes_per_packet);
+    alsa_hw->period_bytes_max = buf_size / 2;
+    alsa_hw->periods_min = 2;
     alsa_hw->periods_max = (uint) (buf_size / desc->bytes_per_packet);
     pr_debug("aaudio_create_hw_info: format = %llu, rate = %u/%u. channels = %u, periods = %u, period size = %lu\n",
             alsa_hw->formats, alsa_hw->rate_min, alsa_hw->rates, alsa_hw->channels_min, alsa_hw->periods_min,
@@ -109,8 +109,14 @@ static struct aaudio_stream *aaudio_pcm_stream(struct snd_pcm_substream *substre
 
 static int aaudio_pcm_open(struct snd_pcm_substream *substream)
 {
+    struct aaudio_stream *stream = aaudio_pcm_stream(substream);
     pr_debug("aaudio_pcm_open\n");
-    substream->runtime->hw = *aaudio_pcm_stream(substream)->alsa_hw_desc;
+    substream->runtime->hw = *stream->alsa_hw_desc;
+
+    /* Period size must be a multiple of the hardware packet size */
+    snd_pcm_hw_constraint_step(substream->runtime, 0,
+            SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+            stream->desc.frames_per_packet);
 
     return 0;
 }
@@ -150,29 +156,31 @@ static void aaudio_pcm_start(struct snd_pcm_substream *substream)
 {
     struct aaudio_subdevice *sdev = snd_pcm_substream_chip(substream);
     struct aaudio_stream *stream = aaudio_pcm_stream(substream);
-    void *buf;
+    void *buf = NULL;
     size_t s;
     ktime_t time_start, time_end;
-    bool back_buffer;
     time_start = ktime_get();
-
-    back_buffer = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK);
-
-    if (back_buffer) {
-        s = frames_to_bytes(substream->runtime, substream->runtime->control->appl_ptr);
-        buf = kmalloc(s, GFP_KERNEL);
-        memcpy_fromio(buf, substream->runtime->dma_area, s);
-        time_end = ktime_get();
-        pr_debug("aaudio: Backed up the buffer in %lluns [%li]\n", ktime_to_ns(time_end - time_start),
-                substream->runtime->control->appl_ptr);
-    }
 
     stream->waiting_for_first_ts = true;
     stream->frame_min = stream->latency;
+    stream->elapsed_count = 0;
 
-    aaudio_cmd_start_io(sdev->a, sdev->dev_id);
-    if (back_buffer)
-        memcpy_toio(substream->runtime->dma_area, buf, s);
+    s = frames_to_bytes(substream->runtime, substream->runtime->control->appl_ptr);
+
+    if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+        /* Backup MMIO buffer before start_io (which may clear it),
+         * then restore the pre-filled audio data afterwards. */
+        buf = kmalloc(s, GFP_KERNEL);
+        if (buf)
+            memcpy_fromio(buf, substream->runtime->dma_area, s);
+        aaudio_cmd_start_io(sdev->a, sdev->dev_id);
+        if (buf) {
+            memcpy_toio(substream->runtime->dma_area, buf, s);
+            kfree(buf);
+        }
+    } else {
+        aaudio_cmd_start_io(sdev->a, sdev->dev_id);
+    }
 
     time_end = ktime_get();
     pr_debug("aaudio: Started the audio device in %lluns\n", ktime_to_ns(time_end - time_start));
@@ -235,6 +243,28 @@ static snd_pcm_uframes_t aaudio_pcm_pointer(struct snd_pcm_substream *substream)
     return (snd_pcm_uframes_t) frames;
 }
 
+static int aaudio_pcm_mmap(struct snd_pcm_substream *substream,
+                           struct vm_area_struct *vma)
+{
+    struct snd_pcm_runtime *runtime = substream->runtime;
+
+    /* Use write-combining for playback: PipeWire's stores are batched into
+     * efficient PCI transactions instead of individual uncached writes. */
+    if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+        vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+    else
+        vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+    return vm_iomap_memory(vma, runtime->dma_addr, runtime->dma_bytes);
+}
+
+static int aaudio_pcm_ack(struct snd_pcm_substream *substream)
+{
+    /* Flush write-combine buffers so the T2 sees fresh audio data. */
+    if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+        wmb();
+    return 0;
+}
+
 static struct snd_pcm_ops aaudio_pcm_ops = {
         .open =        aaudio_pcm_open,
         .close =       aaudio_pcm_close,
@@ -244,7 +274,8 @@ static struct snd_pcm_ops aaudio_pcm_ops = {
         .prepare =     aaudio_pcm_prepare,
         .trigger =     aaudio_pcm_trigger,
         .pointer =     aaudio_pcm_pointer,
-        .mmap    =     snd_pcm_lib_mmap_iomem
+        .mmap    =     aaudio_pcm_mmap,
+        .ack     =     aaudio_pcm_ack
 };
 
 int aaudio_create_pcm(struct aaudio_subdevice *sdev)
@@ -292,6 +323,19 @@ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, 
         return;
     }
     snd_pcm_stream_unlock_irqrestore(substream, flags);
+
+    /* Only fire period_elapsed once per period's worth of hardware packets.
+     * Count timestamps rather than using wall-clock time so that bursty
+     * message delivery (e.g. after a scheduling delay) doesn't swallow
+     * period notifications. */
+    if (substream->runtime->period_size) {
+        unsigned int packets_per_period = substream->runtime->period_size /
+                                          stream->desc.frames_per_packet;
+        stream->elapsed_count++;
+        if (packets_per_period > 1 && stream->elapsed_count < packets_per_period)
+            return;
+        stream->elapsed_count = 0;
+    }
     snd_pcm_period_elapsed(substream);
 }
 

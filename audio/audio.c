@@ -73,7 +73,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     dev_info(aaudio->dev, "aaudio: bs len = %llx\n", pci_resource_len(dev, 0));
     aaudio->reg_mem_bs_dma = pci_resource_start(dev, 0);
-    aaudio->reg_mem_bs = pci_iomap(dev, 0, 0);
+    aaudio->reg_mem_bs = pci_iomap_wc(dev, 0, 0);
     aaudio->reg_mem_cfg = pci_iomap(dev, 4, 0);
 
     aaudio->reg_mem_gpr = (u32 __iomem *) ((u8 __iomem *) aaudio->reg_mem_cfg + 0xC000);
@@ -514,7 +514,7 @@ static void aaudio_init_bs_stream_host(struct aaudio_device *a, struct aaudio_st
     size_t size;
     dma_addr_t dma_addr;
     void *dma_ptr;
-    size = strm->desc.bytes_per_packet * 16640;
+    size = strm->desc.bytes_per_packet * 4096;
     dma_ptr = dma_alloc_coherent(&a->pci->dev, size, &dma_addr, GFP_KERNEL);
     if (!dma_ptr) {
         dev_err(a->dev, "dma_alloc_coherent failed\n");

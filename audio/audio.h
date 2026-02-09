@@ -67,6 +67,7 @@ struct aaudio_stream {
     ktime_t remote_timestamp;
     snd_pcm_sframes_t frame_min;
     int started;
+    unsigned int elapsed_count;
 };
 struct aaudio_subdevice {
     struct aaudio_device *a;
