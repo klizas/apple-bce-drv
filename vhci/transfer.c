@@ -6,7 +6,7 @@
 
 static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq);
 static void bce_vhci_transfer_queue_giveback(struct bce_vhci_transfer_queue *q);
-static void bce_vhci_transfer_queue_remove_pending(struct bce_vhci_transfer_queue *q);
+void bce_vhci_transfer_queue_remove_pending(struct bce_vhci_transfer_queue *q);
 
 static int bce_vhci_urb_init(struct bce_vhci_urb *vurb);
 static void bce_vhci_urb_complete(struct bce_vhci_urb *urb, int status);
@@ -128,7 +128,7 @@ static void bce_vhci_transfer_queue_deliver_pending(struct bce_vhci_transfer_que
     bce_vhci_transfer_queue_init_pending_urbs(q);
 }
 
-static void bce_vhci_transfer_queue_remove_pending(struct bce_vhci_transfer_queue *q)
+void bce_vhci_transfer_queue_remove_pending(struct bce_vhci_transfer_queue *q)
 {
     unsigned long flags;
     struct bce_vhci_list_message *lm;
@@ -139,6 +139,25 @@ static void bce_vhci_transfer_queue_remove_pending(struct bce_vhci_transfer_queu
         kfree(lm);
     }
     spin_unlock_irqrestore(&q->urb_lock, flags);
+}
+
+void bce_vhci_transfer_queue_cancel_all(struct bce_vhci_transfer_queue *q)
+{
+    unsigned long flags;
+    struct urb *urb, *urbt;
+    struct bce_vhci_urb *vurb;
+
+    spin_lock_irqsave(&q->urb_lock, flags);
+    q->active = false;
+    list_for_each_entry_safe(urb, urbt, &q->endp->urb_list, urb_list) {
+        vurb = urb->hcpriv;
+        bce_vhci_urb_complete(vurb, -ECONNRESET);
+    }
+    spin_unlock_irqrestore(&q->urb_lock, flags);
+    /* Clear hcpriv before giveback so completion handlers can't
+     * resubmit to a queue that's about to be destroyed */
+    q->endp->hcpriv = NULL;
+    bce_vhci_transfer_queue_giveback(q);
 }
 
 void bce_vhci_transfer_queue_event(struct bce_vhci_transfer_queue *q, struct bce_vhci_message *msg)
@@ -203,6 +222,7 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
             pr_err("bce-vhci: [%02x] Got a completion while no requests are pending\n", q->endp_addr);
             if (is_sq_out && atomic_dec_if_positive(&q->sq_out_pending) == 0)
                 wake_up(&q->sq_out_wait_queue);
+            bce_notify_submission_complete(sq);
             continue;
         }
         pr_debug("bce-vhci: [%02x] Got a transfer queue completion\n", q->endp_addr);
@@ -672,12 +692,22 @@ static int bce_vhci_urb_control_check_status(struct bce_vhci_urb *urb)
         urb->state != BCE_VHCI_URB_CONTROL_WAITING_FOR_SETUP_COMPLETION)) {
         urb->state = BCE_VHCI_URB_CONTROL_COMPLETE;
         if (urb->received_status != BCE_VHCI_SUCCESS) {
-            pr_err("bce-vhci: [%02x] URB failed: %x\n", urb->q->endp_addr, urb->received_status);
+            if (urb->is_control && urb->urb->setup_packet) {
+                struct usb_ctrlrequest *setup = (struct usb_ctrlrequest *)urb->urb->setup_packet;
+                pr_err("bce-vhci: [%02x] URB failed: %x (dev=%d) setup=%02x/%02x val=%04x idx=%04x len=%04x\n",
+                       urb->q->endp_addr, urb->received_status, urb->q->dev_addr,
+                       setup->bRequestType, setup->bRequest,
+                       le16_to_cpu(setup->wValue), le16_to_cpu(setup->wIndex),
+                       le16_to_cpu(setup->wLength));
+            } else {
+                pr_err("bce-vhci: [%02x] URB failed: %x (dev=%d)\n",
+                       urb->q->endp_addr, urb->received_status, urb->q->dev_addr);
+            }
             urb->q->active = false;
             urb->q->stalled = true;
             bce_vhci_urb_complete(urb, -EPIPE);
-            if (!list_empty(&q->endp->urb_list))
-                bce_vhci_transfer_queue_request_reset(q);
+            bce_vhci_transfer_queue_request_reset(q);
+
             return -ENOENT;
         }
         bce_vhci_urb_complete(urb, 0);

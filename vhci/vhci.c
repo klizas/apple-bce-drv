@@ -170,11 +170,17 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
          * core sees the device as disconnected without querying T2.
          * Avoids hundreds of wasted T2 PCIe round-trips during PM resume
          * when USB core polls all ports repeatedly. */
-        if (test_bit(wIndex, &vhci->port_reenumerate_mask))
+        if (test_bit(wIndex, &vhci->port_reenumerate_mask)) {
+            ps->wPortChange |= USB_PORT_STAT_C_CONNECTION;
             return 0;
+        }
 
-        if ((status = bce_vhci_cmd_port_status(&vhci->cq, (u8) wIndex, 0, &port_status)))
-            return status;
+        if (test_and_clear_bit(wIndex, &vhci->port_status_cached)) {
+            port_status = vhci->port_status_cache[wIndex];
+        } else {
+            if ((status = bce_vhci_cmd_port_status(&vhci->cq, (u8) wIndex, 0, &port_status)))
+                return status;
+        }
 
         if (port_status & 16)
             ps->wPortStatus |= USB_PORT_STAT_ENABLE | USB_PORT_STAT_HIGH_SPEED;
@@ -294,23 +300,31 @@ static void bce_vhci_free_device(struct usb_hcd *hcd, struct usb_device *udev)
     }
     devid = vhci->port_to_device[udev->portnum];
     dev = vhci->devices[devid];
+
+    /* Clear device mappings first to prevent concurrent access from
+     * event handlers during teardown. */
+    vhci->devices[devid] = NULL;
+    vhci->port_to_device[udev->portnum] = 0;
+
+    /* Host-side cleanup only: clear hcpriv, destroy transfer queues.
+     * Skip per-endpoint T2 pause+destroy commands -- device_destroy
+     * handles T2-side cleanup implicitly (same pattern as
+     * bce_vhci_reset_device). USB core has already dequeued all URBs
+     * before free_dev, so no DMA is in flight. */
     for (i = 0; i < 32; i++) {
         if (dev->tq_mask & BIT(i)) {
-            bce_vhci_transfer_queue_pause(&dev->tq[i], BCE_VHCI_PAUSE_SHUTDOWN);
-            bce_vhci_cmd_endpoint_destroy(&vhci->cq, devid, dev->tq[i].endp_addr);
-            /*
-             * Suspend/resume fix: Clear hcpriv BEFORE destroying the queue
-             * to prevent use-after-free if URB operations occur during teardown.
-             */
             if (dev->tq[i].endp)
                 dev->tq[i].endp->hcpriv = NULL;
             bce_vhci_destroy_transfer_queue(vhci, &dev->tq[i]);
         }
     }
-    dev->tq_mask = 0; /* Mark all queues as freed */
-    vhci->devices[devid] = NULL;
-    vhci->port_to_device[udev->portnum] = 0;
-    bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+    dev->tq_mask = 0;
+    /* Skip device_destroy when reenumerate_mask is set — bus_resume
+     * already handled T2-side teardown (either T2 reconnected and
+     * destroyed the old device itself, or we called device_destroy
+     * explicitly to force re-enumeration). */
+    if (!test_bit(udev->portnum, &vhci->port_reenumerate_mask))
+        bce_vhci_cmd_device_destroy(&vhci->cq, devid);
     kfree(dev);
 
     /* If this port was marked for forced re-enumeration, the device is now
@@ -331,11 +345,23 @@ static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout)
     int i;
     int status;
     enum dma_data_direction dir;
-    pr_debug("bce_vhci_reset_device %i\n", index);
+
+    /* After bus_resume refresh, skip reset_device calls from USB core's
+     * reset_resume path — the T2 device was already refreshed in bus_resume.
+     * USB core calls reset_device twice (hub_port_reset + hub_port_init),
+     * so we skip both. The port is already enabled from the refresh. */
+    if (vhci->port_resume_skip_reset[index] > 0) {
+        pr_info("bce_vhci_reset_device: port %d skipped (resume, remaining=%d)\n",
+                index, vhci->port_resume_skip_reset[index] - 1);
+        vhci->port_resume_skip_reset[index]--;
+        return 0;
+    }
 
     devid = vhci->port_to_device[index];
     if (devid) {
         dev = vhci->devices[devid];
+        pr_info("bce_vhci_reset_device: port %d devid=%d tq_mask=0x%x\n",
+                index, devid, dev ? dev->tq_mask : 0);
 
         for (i = 0; i < 32; i++) {
             if (!(dev->tq_mask & BIT(i)))
@@ -352,6 +378,8 @@ static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout)
         vhci->port_to_device[index] = 0;
         /* T2 implicitly destroys endpoints with device_destroy */
         bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+    } else {
+        pr_info("bce_vhci_reset_device: port %d (no device)\n", index);
     }
     status = bce_vhci_cmd_port_reset(&vhci->cq, (u8) index, timeout);
 
@@ -377,68 +405,6 @@ static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout)
     return status;
 }
 
-static int bce_vhci_refresh_device(struct bce_vhci *vhci, int index)
-{
-    struct bce_vhci_device *vdev;
-    bce_vhci_device_t devid;
-    struct bce_vhci_transfer_queue *tq;
-    unsigned long flags;
-    int i, status, ret = 0;
-
-    devid = vhci->port_to_device[index];
-    if (!devid)
-        return 0;
-    vdev = vhci->devices[devid];
-    if (!vdev)
-        return 0;
-
-    pr_debug("bce_vhci: refresh: port %d (devid=%d, tq_mask=0x%x)\n",
-            index, devid, vdev->tq_mask);
-
-    /* Resume each endpoint to ACTIVE without touching T2 device/endpoint
-     * objects or DMA queues.
-     *
-     * Reset all transient state — any pause source (SUSPEND, INTERNAL_WQ
-     * from deferred URB cancel, etc.) may have accumulated before S3.
-     * Also reset sq_out_pending since DMA completions from before S3
-     * will never arrive. */
-    for (i = 0; i < 32; i++) {
-        if (!(vdev->tq_mask & BIT(i)))
-            continue;
-        tq = &vdev->tq[i];
-
-        /* Cancel any deferred work from before S3 */
-        cancel_work_sync(&tq->w_pause);
-        cancel_work_sync(&tq->w_reset);
-        cancel_work_sync(&tq->w_resume);
-
-        mutex_lock(&tq->pause_lock);
-
-        /* Reset stale host-side state */
-        atomic_set(&tq->sq_out_pending, 0);
-        WRITE_ONCE(tq->needs_pause, false);
-        tq->paused_by = 0;
-        spin_lock_irqsave(&tq->urb_lock, flags);
-        tq->stalled = false;
-        spin_unlock_irqrestore(&tq->urb_lock, flags);
-
-        /* Tell T2 to resume endpoint from PAUSED to ACTIVE */
-        status = bce_vhci_transfer_queue_do_resume(tq);
-        mutex_unlock(&tq->pause_lock);
-
-        if (status) {
-            pr_warn("bce_vhci: refresh: port %d endpoint %d resume failed (err=%d)\n",
-                    index, i, status);
-            ret = status;
-        }
-    }
-
-    if (!ret)
-        pr_info("bce_vhci: refresh: port %d device resumed (devid=%d)\n",
-                index, devid);
-    return ret;
-}
-
 static int bce_vhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
 {
     return 0;
@@ -457,20 +423,25 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
     struct bce_vhci_transfer_queue *tq;
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
     pr_info("bce_vhci: suspend started\n");
+    pr_info("bce_vhci: suspend: msg queue slots: cmd=%d/%d sys=%d/%d async=%d/%d int=%d/%d iso=%d/%d\n",
+            atomic_read(&vhci->msg_commands.sq->available_commands), vhci->msg_commands.sq->el_count - 1,
+            atomic_read(&vhci->msg_system.sq->available_commands), vhci->msg_system.sq->el_count - 1,
+            atomic_read(&vhci->msg_asynchronous.sq->available_commands), vhci->msg_asynchronous.sq->el_count - 1,
+            atomic_read(&vhci->msg_interrupt.sq->available_commands), vhci->msg_interrupt.sq->el_count - 1,
+            atomic_read(&vhci->msg_isochronous.sq->available_commands), vhci->msg_isochronous.sq->el_count - 1);
+    WRITE_ONCE(vhci->port_status_cached, 0);
     WRITE_ONCE(vhci->port_resume_mask, 0);
     /* Clear any leftover re-enumeration state from a previous resume cycle
      * that didn't fully complete before this suspend. Stale bits would
      * confuse the next resume cycle. */
     WRITE_ONCE(vhci->port_reenumerate_mask, 0);
-    flush_workqueue(vhci->tq_state_wq);
 
-    /* Pause endpoints on T2 with just the state command — skip the output
-     * wait and queue flushes from do_pause() that caused progressive suspend
-     * slowdown (3 T2 round-trips per endpoint × ~15 endpoints = 45 commands,
-     * each with 5s timeout). T2 needs explicit endpoint pauses before port
-     * suspend to avoid inconsistent internal state after save/restore.
-     * Setting SUSPEND also prevents free_device from calling do_pause()
-     * during re-enumeration teardown on resume. */
+    /* Pause endpoints on T2 BEFORE flushing the workqueue. The lightweight
+     * pause sets paused_by |= SUSPEND and clears needs_pause, which
+     * short-circuits any pending w_pause workers — they'll see paused_by
+     * is already set and skip the expensive do_pause() path. Without this
+     * ordering, flush_workqueue blocks on N × do_pause() (3 T2 round-trips
+     * per endpoint), causing progressive suspend slowdown. */
     for (i = 0; i < 16; i++) {
         struct bce_vhci_device *vdev;
         if (!vhci->port_to_device[i])
@@ -493,9 +464,12 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
                             i, j, status);
             }
             tq->paused_by |= BCE_VHCI_PAUSE_SUSPEND;
+            WRITE_ONCE(tq->needs_pause, false);
             mutex_unlock(&tq->pause_lock);
         }
     }
+
+    flush_workqueue(vhci->tq_state_wq);
 
     pr_debug("bce_vhci: suspend: suspending ports\n");
     for (i = 0; i < 16; i++) {
@@ -535,12 +509,18 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
 
 static int bce_vhci_bus_resume(struct usb_hcd *hcd)
 {
-    int i;
+    static unsigned int resume_cycle;
+    int i, j;
     int status;
     int need_poll = 0;
     u32 port_status;
+    struct bce_vhci_device *vdev;
+    bce_vhci_device_t devid, new_devid;
+    struct usb_host_endpoint *ep0_endp;
+    struct usb_device *udev;
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
-    pr_info("bce_vhci: resume started\n");
+    ++resume_cycle;
+    pr_info("bce_vhci: resume started (cycle %u)\n", resume_cycle);
 
     pr_debug("bce_vhci: resume: resuming event queues\n");
     bce_vhci_event_queue_resume(&vhci->ev_commands);
@@ -557,6 +537,12 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
         return status;
     }
 
+    /* Flush stale DMA transfer submissions from before S3. Only
+     * msg_asynchronous carries DMA transfers; the other queues
+     * (commands, system, interrupt, isochronous) were proven to have
+     * no slot leaks across suspend/resume. */
+    bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_asynchronous.sq->qid);
+
     pr_debug("bce_vhci: resume: resuming ports\n");
     for (i = 0; i < 16; i++) {
         if (!vhci->port_to_device[i])
@@ -564,40 +550,107 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
         bce_vhci_cmd_port_resume(&vhci->cq, i);
     }
 
-    /* Resume each connected port by clearing the SUSPEND pause flag and
-     * sending set_state(ACTIVE) to T2 for each endpoint. T2 device,
-     * endpoint, and DMA state are all left intact.
-     * On failure, fall back to re-enumeration for that port only. */
-    pr_debug("bce_vhci: resume: refreshing T2 devices\n");
+    /* Per-port classification: silent refresh + reset_resume for surviving
+     * devices, re-enumeration for reconnected/error ports. */
     for (i = 0; i < 16; i++) {
         if (!vhci->port_to_device[i])
             continue;
-        status = bce_vhci_refresh_device(vhci, i);
-        if (status) {
-            pr_warn("bce_vhci: resume: refresh failed for port %d (err=%d), falling back to re-enumeration\n",
-                    i, status);
-            clear_bit(i, &vhci->port_suppress_connect_mask);
-            set_bit(i, &vhci->port_reenumerate_mask);
-            set_bit(i, &vhci->port_resume_mask);
-            need_poll = 1;
-        } else {
-            /* Clear T2 connection change bit so GetPortStatus won't
-             * report C_CONNECTION from the T2 side either. Also clear
-             * any port_resume_mask bit that might have been set by a
-             * PORT_CONNECT event that raced past the suppress mask. */
+
+        devid = vhci->port_to_device[i];
+        vdev = vhci->devices[devid];
+
+        status = bce_vhci_cmd_port_status(&vhci->cq, (u8) i, 0, &port_status);
+        if (!status && (port_status & 0x40000)) {
+            /* T2 reconnected — it already destroyed the old device */
+            pr_info("bce_vhci: resume: port %d connection changed during sleep\n", i);
             bce_vhci_cmd_port_status(&vhci->cq, (u8) i, 0x40000, &port_status);
-            clear_bit(i, &vhci->port_resume_mask);
+            goto reenumerate;
         }
+
+        if (status || !(port_status & 0x4)) {
+            /* Error querying port or device disconnected */
+            pr_info("bce_vhci: resume: port %d error/disconnected (status=%d, port_status=0x%x)\n",
+                    i, status, port_status);
+            bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+            goto reenumerate;
+        }
+
+        /* Device survived sleep — refresh T2 device with EP0 only.
+         * Creating only EP0 (not all endpoints) matches boot-time state
+         * and prevents T2 from stalling on GET_DESCRIPTOR.
+         * USB core's reset_resume will send SET_CONFIGURATION, then
+         * add_endpoint recreates non-EP0 endpoints. */
+        pr_info("bce_vhci: resume: port %d refreshing (devid=%d, tq_mask=0x%x)\n",
+                i, devid, vdev->tq_mask);
+
+        /* Save EP0 endpoint pointer before destroying queues */
+        ep0_endp = vdev->tq[0].endp;
+
+        /* Cancel all in-flight URBs and destroy ALL transfer queues */
+        for (j = 0; j < 32; j++) {
+            if (!(vdev->tq_mask & BIT(j)))
+                continue;
+            bce_vhci_transfer_queue_cancel_all(&vdev->tq[j]);
+            if (vdev->tq[j].endp)
+                vdev->tq[j].endp->hcpriv = NULL;
+            bce_vhci_destroy_transfer_queue(vhci, &vdev->tq[j]);
+        }
+        vdev->tq_mask = 0;
+
+        /* Clear mappings before T2 commands */
+        vhci->devices[devid] = NULL;
+        vhci->port_to_device[i] = 0;
+
+        /* Destroy and recreate T2 device — port_reset required by T2
+         * before device_create will succeed. */
+        bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+        bce_vhci_cmd_port_reset(&vhci->cq, (u8) i, 0);
+        if (bce_vhci_cmd_device_create(&vhci->cq, i, &new_devid)) {
+            pr_err("bce_vhci: resume: port %d device_create failed, falling back to re-enum\n", i);
+            kfree(vdev);
+            goto reenumerate;
+        }
+
+        /* Update mappings with new device ID */
+        vhci->devices[new_devid] = vdev;
+        vhci->port_to_device[i] = new_devid;
+
+        /* Create ONLY EP0 — matches boot-time device state.
+         * Non-EP0 endpoints will be recreated by add_endpoint
+         * when USB core restores configuration during reset_resume. */
+        bce_vhci_create_transfer_queue(vhci, &vdev->tq[0], ep0_endp, new_devid, DMA_BIDIRECTIONAL);
+        ep0_endp->hcpriv = &vdev->tq[0];
+        vdev->tq_mask = BIT(0);
+        bce_vhci_cmd_endpoint_create(&vhci->cq, new_devid, &ep0_endp->desc);
+
+        /* Tell USB core to do reset_resume: sends SET_CONFIGURATION
+         * so devices are properly configured after port_reset.
+         * Skip the 2 reset_device calls USB core will make —
+         * T2 was already refreshed above. */
+        vhci->port_resume_skip_reset[i] = 2;
+        udev = usb_hub_find_child(hcd->self.root_hub, i);
+        if (udev)
+            udev->reset_resume = 1;
+
+        pr_info("bce_vhci: resume: port %d refresh done (new devid=%d, EP0 only)\n", i, new_devid);
+        clear_bit(i, &vhci->port_suppress_connect_mask);
+        continue;
+
+    reenumerate:
+        /* Leave port_to_device/devices intact for free_device cleanup.
+         * free_device will skip device_destroy (reenumerate_mask set). */
+        clear_bit(i, &vhci->port_suppress_connect_mask);
+        set_bit(i, &vhci->port_reenumerate_mask);
+        set_bit(i, &vhci->port_resume_mask);
+        need_poll = 1;
     }
 
-    /* Clear suppress bits now that all ports are refreshed and any
-     * PORT_CONNECT events during resume have been suppressed. */
     WRITE_ONCE(vhci->port_suppress_connect_mask, 0);
 
     if (need_poll)
         usb_hcd_poll_rh_status(vhci->hcd);
 
-    pr_info("bce_vhci: resume done\n");
+    pr_info("bce_vhci: resume done (cycle %u)\n", resume_cycle);
     return 0;
 }
 
@@ -688,7 +741,12 @@ static int bce_vhci_drop_endpoint(struct usb_hcd *hcd, struct usb_device *udev, 
         }
     }
 
-    bce_vhci_cmd_endpoint_destroy(&vhci->cq, devid, (u8) (endp->desc.bEndpointAddress & 0x8Fu));
+    /* During device disconnect, skip T2 endpoint_destroy command.
+     * device_destroy in free_device handles T2-side cleanup implicitly
+     * (same pattern as bce_vhci_reset_device). Avoids one T2 round-trip
+     * per endpoint on the shared command queue mutex. */
+    if (udev->state != USB_STATE_NOTATTACHED)
+        bce_vhci_cmd_endpoint_destroy(&vhci->cq, devid, (u8) (endp->desc.bEndpointAddress & 0x8Fu));
     vdev->tq_mask &= ~BIT(endp_index);
     bce_vhci_destroy_transfer_queue(vhci, q);
     endp->hcpriv = NULL;

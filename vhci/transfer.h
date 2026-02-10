@@ -78,6 +78,9 @@ int bce_vhci_transfer_queue_pause(struct bce_vhci_transfer_queue *q, enum bce_vh
 int bce_vhci_transfer_queue_resume(struct bce_vhci_transfer_queue *q, enum bce_vhci_pause_source src);
 void bce_vhci_transfer_queue_request_reset(struct bce_vhci_transfer_queue *q);
 
+void bce_vhci_transfer_queue_remove_pending(struct bce_vhci_transfer_queue *q);
+void bce_vhci_transfer_queue_cancel_all(struct bce_vhci_transfer_queue *q);
+
 int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb, gfp_t mem_flags);
 int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *urb, int status);
 

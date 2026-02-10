@@ -6,6 +6,7 @@
 #include <linux/usb.h>
 
 #define BCE_VHCI_CMD_TIMEOUT_SHORT msecs_to_jiffies(2000)
+#define BCE_VHCI_CMD_TIMEOUT_MEDIUM msecs_to_jiffies(5000)
 #define BCE_VHCI_CMD_TIMEOUT_LONG msecs_to_jiffies(30000)
 
 #define BCE_VHCI_BULK_MAX_ACTIVE_URBS_POW2 2
@@ -153,7 +154,7 @@ static inline int bce_vhci_cmd_device_destroy(struct bce_vhci_command_queue *q, 
     struct bce_vhci_message cmd, res;
     cmd.cmd = BCE_VHCI_CMD_DEVICE_DESTROY;
     cmd.param1 = dev;
-    return bce_vhci_command_queue_execute(q, &cmd, &res, BCE_VHCI_CMD_TIMEOUT_LONG);
+    return bce_vhci_command_queue_execute(q, &cmd, &res, BCE_VHCI_CMD_TIMEOUT_MEDIUM);
 }
 
 static inline int bce_vhci_cmd_endpoint_create(struct bce_vhci_command_queue *q, bce_vhci_device_t dev,
