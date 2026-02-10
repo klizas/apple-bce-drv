@@ -8,6 +8,8 @@ struct bce_queue_cq *bce_alloc_cq(struct apple_bce_device *dev, int qid, u32 el_
 {
     struct bce_queue_cq *q;
     q = kzalloc(sizeof(struct bce_queue_cq), GFP_KERNEL);
+    if (!q)
+        return NULL;
     q->qid = qid;
     q->type = BCE_QUEUE_CQ;
     q->el_count = el_count;
@@ -87,17 +89,6 @@ void bce_handle_cq_completions(struct apple_bce_device *dev, struct bce_queue_cq
         cq->index = (cq->index + 1) % cq->el_count;
     }
     mb();
-    /* During resume, verify T2 link before CQ doorbell write.
-     * Same protection as bce_submit_to_device() — if T2 crashed
-     * mid-resume, skip the MMIO to avoid hanging/crashing the CPU. */
-    if (unlikely(atomic_read(&dev->resuming))) {
-        u16 vid;
-        pci_read_config_word(dev->pci, PCI_VENDOR_ID, &vid);
-        if (vid != PCI_VENDOR_ID_APPLE) {
-            pr_err("apple-bce: T2 link down, skipping CQ doorbell write\n");
-            return;
-        }
-    }
     iowrite32(cq->index, (u32 *) ((u8 *) dev->reg_mem_dma +  REG_DOORBELL_BASE) + cq->qid);
     while (ce) {
         --ce;
@@ -113,6 +104,8 @@ struct bce_queue_sq *bce_alloc_sq(struct apple_bce_device *dev, int qid, u32 el_
 {
     struct bce_queue_sq *q;
     q = kzalloc(sizeof(struct bce_queue_sq), GFP_KERNEL);
+    if (!q)
+        return NULL;
     q->qid = qid;
     q->type = BCE_QUEUE_SQ;
     q->el_size = el_size;
@@ -121,7 +114,6 @@ struct bce_queue_sq *bce_alloc_sq(struct apple_bce_device *dev, int qid, u32 el_
                                  &q->dma_handle, GFP_KERNEL);
     q->completion = compl;
     q->userdata = userdata;
-    q->dev = dev;
     q->completion_data = kzalloc(sizeof(struct bce_sq_completion_data) * el_count, GFP_KERNEL);
     q->reg_mem_dma = dev->reg_mem_dma;
     atomic_set(&q->available_commands, el_count - 1);
@@ -185,18 +177,6 @@ void *bce_next_submission(struct bce_queue_sq *sq)
 void bce_submit_to_device(struct bce_queue_sq *sq)
 {
     mb();
-    /* During resume, verify T2 PCIe link is up before MMIO doorbell write.
-     * PCI config reads are safe even when the link is down (routed through
-     * root port, returns 0xFFFF). This prevents a CPU hang from writing
-     * to a downed link if T2 crashes mid-resume. */
-    if (unlikely(sq->dev && atomic_read(&sq->dev->resuming))) {
-        u16 vid;
-        pci_read_config_word(sq->dev->pci, PCI_VENDOR_ID, &vid);
-        if (vid != PCI_VENDOR_ID_APPLE) {
-            pr_err("apple-bce: T2 link down, skipping doorbell write\n");
-            return;
-        }
-    }
     iowrite32(sq->tail, (u32 *) ((u8 *) sq->reg_mem_dma +  REG_DOORBELL_BASE) + sq->qid);
 }
 
@@ -222,6 +202,8 @@ struct bce_queue_cmdq *bce_alloc_cmdq(struct apple_bce_device *dev, int qid, u32
 {
     struct bce_queue_cmdq *q;
     q = kzalloc(sizeof(struct bce_queue_cmdq), GFP_KERNEL);
+    if (!q)
+        return NULL;
     q->sq = bce_alloc_sq(dev, qid, BCE_CMD_SIZE, el_count, bce_cmdq_completion, q);
     if (!q->sq) {
         kfree(q);
@@ -230,6 +212,14 @@ struct bce_queue_cmdq *bce_alloc_cmdq(struct apple_bce_device *dev, int qid, u32
     spin_lock_init(&q->lck);
     q->tres = kzalloc(sizeof(struct bce_queue_cmdq_result_el*) * el_count, GFP_KERNEL);
     if (!q->tres) {
+        bce_free_sq(dev, q->sq);
+        kfree(q);
+        return NULL;
+    }
+    q->slot_gen = kzalloc(sizeof(u32) * el_count, GFP_KERNEL);
+    if (!q->slot_gen) {
+        kfree(q->tres);
+        bce_free_sq(dev, q->sq);
         kfree(q);
         return NULL;
     }
@@ -239,6 +229,7 @@ struct bce_queue_cmdq *bce_alloc_cmdq(struct apple_bce_device *dev, int qid, u32
 void bce_free_cmdq(struct apple_bce_device *dev, struct bce_queue_cmdq *cmdq)
 {
     bce_free_sq(dev, cmdq->sq);
+    kfree(cmdq->slot_gen);
     kfree(cmdq->tres);
     kfree(cmdq);
 }
@@ -252,13 +243,13 @@ void bce_cmdq_completion(struct bce_queue_sq *q)
     spin_lock(&cmdq->lck);
     while ((result = bce_next_completion(q))) {
         el = cmdq->tres[cmdq->sq->head];
-        if (el) {
+        if (el && el->generation == cmdq->slot_gen[cmdq->sq->head]) {
             el->result = result->result;
             el->status = result->status;
             mb();
             complete(&el->cmpl);
         } else {
-            /* Slot was NULLed by a timeout — discard the late completion */
+            /* Slot was NULLed by a timeout or generation mismatch — discard */
             pr_debug("apple-bce: discarding late command completion\n");
         }
         cmdq->tres[cmdq->sq->head] = NULL;
@@ -280,6 +271,7 @@ static __always_inline void *bce_cmd_start(struct bce_queue_cmdq *cmdq, struct b
 
     spin_lock(&cmdq->lck);
     res->slot = cmdq->sq->tail;
+    res->generation = cmdq->slot_gen[cmdq->sq->tail];
     cmdq->tres[cmdq->sq->tail] = res;
     ret = bce_next_submission(cmdq->sq);
     return ret;
@@ -294,6 +286,7 @@ static __always_inline int bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bc
         pr_err("apple-bce: command queue timeout (slot %u)\n", res->slot);
         spin_lock(&cmdq->lck);
         cmdq->tres[res->slot] = NULL;
+        cmdq->slot_gen[res->slot]++;
         spin_unlock(&cmdq->lck);
         /* Reclaim the slot so the queue doesn't deadlock. If T2 sends
          * a late completion, bce_cmdq_completion will find tres[head]==NULL

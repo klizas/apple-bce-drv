@@ -39,7 +39,6 @@ struct bce_queue_sq {
     dma_addr_t dma_handle;
     void *data;
     void *userdata;
-    struct apple_bce_device *dev;
     void __iomem *reg_mem_dma;
 
     atomic_t available_commands;
@@ -58,11 +57,13 @@ struct bce_queue_cmdq_result_el {
     u32 status;
     u64 result;
     u32 slot;  /* queue slot index for O(1) timeout cleanup */
+    u32 generation;  /* generation counter to detect stale completions */
 };
 struct bce_queue_cmdq {
     struct bce_queue_sq *sq;
     struct spinlock lck;
     struct bce_queue_cmdq_result_el **tres;
+    u32 *slot_gen;  /* per-slot generation counter */
 };
 
 struct bce_queue_memcfg {

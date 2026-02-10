@@ -45,7 +45,7 @@ struct bce_vhci_transfer_queue {
     struct work_struct w_reset;
     struct work_struct w_resume;
     struct work_struct w_pause;
-    bool needs_pause;
+    atomic_t pending_pause_count;
 };
 enum bce_vhci_urb_state {
     BCE_VHCI_URB_INIT_PENDING,

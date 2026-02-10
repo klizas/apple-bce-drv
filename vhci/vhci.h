@@ -40,8 +40,6 @@ struct bce_vhci {
     unsigned long port_resume_mask;        /* Ports with connection change (accessed atomically) */
     unsigned long port_reenumerate_mask;   /* Ports where GetPortStatus hides CONNECTION to force disconnect+re-enum */
     unsigned long port_suppress_connect_mask; /* Ports where PORT_CONNECT events are suppressed during session refresh */
-    u32 port_status_cache[16];             /* Raw T2 port status cached from resume */
-    unsigned long port_status_cached;      /* Bitmask: ports with valid cached status */
     u8 port_resume_skip_reset[16];         /* Skip count for reset_device after bus_resume refresh */
 };
 

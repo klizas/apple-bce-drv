@@ -44,7 +44,7 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
     INIT_WORK(&q->w_reset, bce_vhci_transfer_queue_reset_w);
     INIT_WORK(&q->w_resume, bce_vhci_transfer_queue_deferred_resume_w);
     INIT_WORK(&q->w_pause, bce_vhci_transfer_queue_deferred_pause_w);
-    WRITE_ONCE(q->needs_pause, false);
+    atomic_set(&q->pending_pause_count, 0);
     q->sq_in = NULL;
     if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) {
         snprintf(name, sizeof(name), "VHC1-%i-%02x", dev_addr, 0x80 | usb_endpoint_num(&endp->desc));
@@ -397,12 +397,11 @@ static void bce_vhci_transfer_queue_deferred_pause_w(struct work_struct *work)
     struct bce_vhci_transfer_queue *q =
         container_of(work, struct bce_vhci_transfer_queue, w_pause);
 
-    /* Check needs_pause — if cleared by destroy/refresh, skip the pause */
-    if (!READ_ONCE(q->needs_pause))
-        return;
-    WRITE_ONCE(q->needs_pause, false);
-
-    bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+    /* Drain all pending pause requests. bce_vhci_transfer_queue_pause()
+     * holds pause_lock and checks paused_by — if already paused, it's a
+     * no-op that just adds the flag. So multiple calls are safe. */
+    while (atomic_dec_if_positive(&q->pending_pause_count) >= 0)
+        bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
 }
 
 static void bce_vhci_transfer_queue_init_pending_urbs(struct bce_vhci_transfer_queue *q)
@@ -545,7 +544,7 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
      * endpoint, and multiple cancels compound into apparent system freezes. */
     if (old_state != BCE_VHCI_URB_INIT_PENDING) {
         pr_debug("bce-vhci: [%02x] Cancelling URB (deferring pause)\n", q->endp_addr);
-        WRITE_ONCE(q->needs_pause, true);
+        atomic_inc(&q->pending_pause_count);
         ++q->remaining_active_requests;
     }
 

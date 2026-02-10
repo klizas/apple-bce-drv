@@ -162,11 +162,11 @@ void bce_vhci_event_queue_pause(struct bce_vhci_event_queue *q)
             break;
         }
     }
-    WRITE_ONCE(q->draining, false);
 }
 
 void bce_vhci_event_queue_resume(struct bce_vhci_event_queue *q)
 {
+    WRITE_ONCE(q->draining, false);
     if (atomic_read(&q->sq->available_commands) != q->sq->el_count - 1) {
         pr_err("bce-vhci: resume of a queue with pending submissions\n");
         return;

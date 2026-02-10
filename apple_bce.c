@@ -49,7 +49,7 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     bce->devt = bce_chrdev;
     bce->dev = device_create(bce_class, &dev->dev, bce->devt, NULL, "apple-bce");
     if (IS_ERR_OR_NULL(bce->dev)) {
-        status = PTR_ERR(bce_class);
+        status = PTR_ERR(bce->dev);
         goto fail;
     }
 
@@ -101,7 +101,10 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     global_bce = bce;
 
-    bce_vhci_create(bce, &bce->vhci);
+    if ((status = bce_vhci_create(bce, &bce->vhci))) {
+        pr_err("apple-bce: VHCI creation failed\n");
+        goto fail_vhci;
+    }
 
     /* The T2 chip requires function 0 (NVMe) to be a bus master for DMA
      * on our function. Create a device link for runtime PM ordering.
@@ -113,6 +116,8 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     return 0;
 
+fail_vhci:
+    bce_free_command_queues(bce);
 fail_ts:
     bce_timestamp_stop(&bce->timestamp);
 #ifndef WITHOUT_NVME_PATCH
@@ -166,14 +171,16 @@ static int bce_create_command_queues(struct apple_bce_device *bce)
     }
     bce_get_cq_memcfg(bce->cmd_cq, cfg);
     if ((status = bce_register_command_queue(bce, cfg, false)))
-        goto err;
+        goto err_cfg;
     bce_get_sq_memcfg(bce->cmd_cmdq->sq, bce->cmd_cq, cfg);
     if ((status = bce_register_command_queue(bce, cfg, true)))
-        goto err;
+        goto err_cfg;
     kfree(cfg);
 
     return 0;
 
+err_cfg:
+    kfree(cfg);
 err:
     if (bce->cmd_cq)
         bce_free_cq(bce, bce->cmd_cq);
@@ -375,9 +382,6 @@ static int apple_bce_resume(struct device *dev)
     int i;
     u16 vid;
 
-    /* Mark resume in progress - gates MMIO safety checks in bce_submit_to_device() */
-    atomic_set(&bce->resuming, 1);
-
     /* Wait for T2 PCIe link to re-train after S3.
      * MMIO to the T2 BARs will hang the CPU if the link is down.
      * Config space reads go through the root port and return 0xFFFF safely.
@@ -394,7 +398,6 @@ static int apple_bce_resume(struct device *dev)
     }
     if (vid != PCI_VENDOR_ID_APPLE) {
         pr_err("apple-bce: resume: T2 not accessible after timeout (vid=0x%04x)\n", vid);
-        atomic_set(&bce->resuming, 0);
         enable_irq(pci_irq_vector(bce->pci, 4));
         return -ENODEV;
     }
@@ -403,7 +406,6 @@ static int apple_bce_resume(struct device *dev)
     pci_set_master(bce->pci0);
 
     if ((status = bce_restore_state_and_wake(bce))) {
-        atomic_set(&bce->resuming, 0);
         enable_irq(pci_irq_vector(bce->pci, 4));
         return status;
     }
@@ -412,11 +414,6 @@ static int apple_bce_resume(struct device *dev)
 
     /* Re-enable DMA IRQ now that T2 state is restored and bus mastering is on. */
     enable_irq(pci_irq_vector(bce->pci, 4));
-
-    /* Clear the resuming gate — T2 link is verified and IRQ is re-enabled,
-     * so doorbell writes are safe again. VHCI-level state restoration
-     * happens later in bus_resume, but doorbells are safe from this point. */
-    atomic_set(&bce->resuming, 0);
 
     return 0;
 }
@@ -471,7 +468,6 @@ static int __init apple_bce_module_init(void)
     return 0;
 
 fail_drv:
-    pci_unregister_driver(&apple_bce_pci_driver);
 fail_class:
     class_destroy(bce_class);
 fail_chrdev:

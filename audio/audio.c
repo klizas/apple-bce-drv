@@ -57,7 +57,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     aaudio->devt = aaudio_chrdev;
     aaudio->dev = device_create(aaudio_class, &dev->dev, aaudio->devt, NULL, "aaudio");
     if (IS_ERR_OR_NULL(aaudio->dev)) {
-        status = PTR_ERR(aaudio_class);
+        status = PTR_ERR(aaudio->dev);
         goto fail;
     }
     device_link_add(aaudio->dev, aaudio->bce->dev, DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);
@@ -111,7 +111,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     if ((status = aaudio_cmd_set_remote_access(aaudio, AAUDIO_REMOTE_ACCESS_ON))) {
         dev_err(&dev->dev, "Failed to set remote access\n");
-        return status;
+        goto fail_snd;
     }
 
     if (snd_card_register(aaudio->card)) {
@@ -134,14 +134,15 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 fail_snd:
     snd_card_free(aaudio->card);
 fail:
-    if (aaudio && aaudio->dev)
-        device_destroy(aaudio_class, aaudio->devt);
-    kfree(aaudio);
-
-    if (!IS_ERR_OR_NULL(aaudio->reg_mem_bs))
-        pci_iounmap(dev, aaudio->reg_mem_bs);
-    if (!IS_ERR_OR_NULL(aaudio->reg_mem_cfg))
-        pci_iounmap(dev, aaudio->reg_mem_cfg);
+    if (aaudio) {
+        if (!IS_ERR_OR_NULL(aaudio->reg_mem_bs))
+            pci_iounmap(dev, aaudio->reg_mem_bs);
+        if (!IS_ERR_OR_NULL(aaudio->reg_mem_cfg))
+            pci_iounmap(dev, aaudio->reg_mem_cfg);
+        if (aaudio->dev)
+            device_destroy(aaudio_class, aaudio->devt);
+        kfree(aaudio);
+    }
 
     pci_release_regions(dev);
     pci_disable_device(dev);
@@ -285,7 +286,7 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
     sdev->dev_id = dev_id;
     sdev->buf_id = AAUDIO_BUFFER_ID_NONE;
     strncpy(sdev->uid, uid, uid_len);
-    sdev->uid[uid_len + 1] = '\0';
+    sdev->uid[uid_len] = '\0';
 
     if (aaudio_cmd_get_primitive_property(a, dev_id, dev_id,
             AAUDIO_PROP(AAUDIO_PROP_SCOPE_INPUT, AAUDIO_PROP_LATENCY, 0), NULL, 0, &sdev->in_latency, sizeof(u32)))
@@ -705,7 +706,6 @@ int aaudio_module_init(void)
     return 0;
 
 fail_drv:
-    pci_unregister_driver(&aaudio_pci_driver);
 fail_class:
     class_destroy(aaudio_class);
 fail_chrdev:
