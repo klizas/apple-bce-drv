@@ -61,6 +61,7 @@ struct aaudio_stream {
     struct aaudio_apple_description desc;
     struct snd_pcm_hardware *alsa_hw_desc;
     u32 latency;
+    bool host_allocated;
 
     bool waiting_for_first_ts;
 

@@ -28,6 +28,23 @@ int aaudio_bce_init(struct aaudio_device *dev)
     return 0;
 }
 
+void aaudio_bce_free(struct aaudio_device *dev)
+{
+    struct aaudio_bce *bce = &dev->bcem;
+    if (bce->qin.data)
+        dma_free_coherent(&dev->bce->pci->dev, bce->qin.el_size * bce->qin.el_count,
+                          bce->qin.data, bce->qin.dma_addr);
+    if (bce->qin.sq)
+        bce_destroy_sq(dev->bce, bce->qin.sq);
+    if (bce->qout.data)
+        dma_free_coherent(&dev->bce->pci->dev, bce->qout.el_size * bce->qout.el_count,
+                          bce->qout.data, bce->qout.dma_addr);
+    if (bce->qout.sq)
+        bce_destroy_sq(dev->bce, bce->qout.sq);
+    if (bce->cq)
+        bce_destroy_cq(dev->bce, bce->cq);
+}
+
 int aaudio_bce_queue_init(struct aaudio_device *dev, struct aaudio_bce_queue *q, const char *name, int direction,
         bce_sq_completion cfn)
 {
@@ -127,6 +144,10 @@ static void aaudio_handle_reply(struct aaudio_bce *b, struct aaudio_msg *reply)
     tag_zero[4] = 0;
     if (kstrtoint(&tag_zero[1], 10, &tagn)) {
         pr_err("aaudio_handle_reply: Tag parse failed: %.4s\n", tag);
+        return;
+    }
+    if (tagn < 0 || tagn >= AAUDIO_BCE_QUEUE_TAG_COUNT) {
+        pr_err("aaudio_handle_reply: Tag out of range: %d\n", tagn);
         return;
     }
 

@@ -90,7 +90,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     if (snd_card_new(aaudio->dev, aaudio_alsa_index, aaudio_alsa_id, THIS_MODULE, 0, &aaudio->card)) {
         dev_err(&dev->dev, "aaudio: Failed to create ALSA card\n");
-        goto fail;
+        goto fail_bce;
     }
 
     strcpy(aaudio->card->shortname, "Apple T2 Audio");
@@ -133,6 +133,8 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 fail_snd:
     snd_card_free(aaudio->card);
+fail_bce:
+    aaudio_bce_free(aaudio);
 fail:
     if (aaudio) {
         if (!IS_ERR_OR_NULL(aaudio->reg_mem_bs))
@@ -165,6 +167,7 @@ static void aaudio_remove(struct pci_dev *dev)
         list_del(&sdev->list);
         aaudio_free_dev(sdev);
     }
+    aaudio_bce_free(aaudio);
     pci_iounmap(dev, aaudio->reg_mem_bs);
     pci_iounmap(dev, aaudio->reg_mem_cfg);
     device_destroy(aaudio_class, aaudio->devt);
@@ -326,7 +329,7 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
         sdev->out_streams[i].id = stream_list[i];
         sdev->out_streams[i].buffer_cnt = 0;
         aaudio_init_stream_info(sdev, &sdev->out_streams[i]);
-        sdev->out_streams[i].latency += sdev->in_latency;
+        sdev->out_streams[i].latency += sdev->out_latency;
     }
 
     if (sdev->is_pcm)
@@ -369,8 +372,14 @@ static void aaudio_free_dev(struct aaudio_subdevice *sdev)
     for (i = 0; i < sdev->in_stream_cnt; i++) {
         if (sdev->in_streams[i].alsa_hw_desc)
             kfree(sdev->in_streams[i].alsa_hw_desc);
-        if (sdev->in_streams[i].buffers)
+        if (sdev->in_streams[i].buffers) {
+            if (sdev->in_streams[i].host_allocated)
+                dma_free_coherent(&sdev->a->pci->dev,
+                        sdev->in_streams[i].buffers[0].size,
+                        sdev->in_streams[i].buffers[0].ptr,
+                        sdev->in_streams[i].buffers[0].dma_addr);
             kfree(sdev->in_streams[i].buffers);
+        }
     }
     for (i = 0; i < sdev->out_stream_cnt; i++) {
         if (sdev->out_streams[i].alsa_hw_desc)
@@ -453,9 +462,13 @@ static int aaudio_init_bs(struct aaudio_device *a)
     list_for_each_entry(sdev, &a->subdevice_list, list) {
         if (sdev->buf_id != AAUDIO_BUFFER_ID_NONE)
             continue;
+        if (i >= ARRAY_SIZE(a->bs->devices)) {
+            dev_warn(a->dev, "aaudio: Too many devices, skipping %s\n", sdev->uid);
+            break;
+        }
         sdev->buf_id = i;
         dev_info(a->dev, "aaudio: Created device %i %s\n", i, sdev->uid);
-        strcpy(a->bs->devices[i].name, sdev->uid);
+        strscpy(a->bs->devices[i].name, sdev->uid, sizeof(a->bs->devices[i].name));
         a->bs->devices[i].num_input_streams = 0;
         a->bs->devices[i].num_output_streams = 0;
         a->bs->num_devices = ++i;
@@ -535,6 +548,7 @@ static void aaudio_init_bs_stream_host(struct aaudio_device *a, struct aaudio_st
     strm->buffers[0].dma_addr = dma_addr;
     strm->buffers[0].ptr = dma_ptr;
     strm->buffers[0].size = size;
+    strm->host_allocated = true;
 
     strm->alsa_hw_desc = kmalloc(sizeof(struct snd_pcm_hardware), GFP_KERNEL);
     if (aaudio_create_hw_info(&strm->desc, strm->alsa_hw_desc, strm->buffers[0].size)) {
@@ -624,6 +638,8 @@ void aaudio_handle_prop_change(struct aaudio_device *a, struct aaudio_msg *msg)
      * is not possible when we are in the reply parsing code's context. */
     struct aaudio_prop_change_work_struct *work;
     work = kmalloc(sizeof(struct aaudio_prop_change_work_struct), GFP_KERNEL);
+    if (!work)
+        return;
     work->a = a;
     INIT_WORK(&work->ws, aaudio_handle_prop_change_work);
     aaudio_msg_read_property_changed(msg, &work->dev, &work->obj, &work->prop);
@@ -644,7 +660,8 @@ void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg
     dev_dbg(a->dev, "Received timestamp update for dev=%llx ts=%llx seed=%llx\n", devid, timestamp, update_seed);
 
     sdev = aaudio_find_dev_by_dev_id(a, devid);
-    aaudio_handle_timestamp(sdev, time_os, timestamp);
+    if (sdev)
+        aaudio_handle_timestamp(sdev, time_os, timestamp);
 
     aaudio_send_cmd_response(a, &sctx, msg,
             aaudio_msg_write_update_timestamp_response);

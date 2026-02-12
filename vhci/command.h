@@ -190,7 +190,7 @@ static inline int bce_vhci_cmd_endpoint_set_state(struct bce_vhci_command_queue 
     cmd.param1 = dev | (endpoint << 8);
     cmd.param2 = (u64) newState;
     status = bce_vhci_command_queue_execute(q, &cmd, &res, BCE_VHCI_CMD_TIMEOUT_SHORT);
-    if (status != BCE_VHCI_INTERNAL_ERROR && status != BCE_VHCI_NO_POWER)
+    if (status >= 0 && status != BCE_VHCI_INTERNAL_ERROR && status != BCE_VHCI_NO_POWER)
         *retState = (enum bce_vhci_endpoint_state) res.param2;
     return status;
 }

@@ -195,6 +195,7 @@ static void bce_free_command_queues(struct apple_bce_device *bce)
     bce_free_cmdq(bce, bce->cmd_cmdq);
     bce->cmd_cq = NULL;
     bce->queues[0] = NULL;
+    bce->queues[1] = NULL;
 }
 
 static irqreturn_t bce_handle_mb_irq(int irq, void *dev)

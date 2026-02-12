@@ -259,6 +259,10 @@ static int bce_vhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
     pr_debug("bce_vhci_cmd_device_create %i -> %i\n", udev->portnum, devid);
 
     vdev = kzalloc(sizeof(struct bce_vhci_device), GFP_KERNEL);
+    if (devid >= 16) {
+        kfree(vdev);
+        return -EINVAL;
+    }
     vhci->port_to_device[udev->portnum] = devid;
     vhci->devices[devid] = vdev;
 
@@ -848,6 +852,8 @@ static int bce_vhci_handle_firmware_event(struct bce_vhci *vhci, struct bce_vhci
     struct bce_vhci_transfer_queue *tq;
     if (msg->cmd == BCE_VHCI_CMD_ENDPOINT_REQUEST_STATE || msg->cmd == BCE_VHCI_CMD_ENDPOINT_SET_STATE) {
         devid = (bce_vhci_device_t) (msg->param1 & 0xff);
+        if (devid >= 16)
+            return BCE_VHCI_BAD_ARGUMENT;
         endp = bce_vhci_endpoint_index((u8) ((msg->param1 >> 8) & 0xff));
         dev = vhci->devices[devid];
         if (!dev || !(dev->tq_mask & BIT(endp)))
@@ -1003,6 +1009,10 @@ static void bce_vhci_handle_usb_event(struct bce_vhci_event_queue *q, struct bce
         bce_vhci_command_queue_deliver_completion(&q->vhci->cq, msg);
     } else if (msg->cmd == BCE_VHCI_CMD_TRANSFER_REQUEST || msg->cmd == BCE_VHCI_CMD_CONTROL_TRANSFER_STATUS) {
         devid = (bce_vhci_device_t) (msg->param1 & 0xff);
+        if (devid >= 16) {
+            pr_err("bce-vhci: USB event devid %u out of range\n", devid);
+            return;
+        }
         endp = bce_vhci_endpoint_index((u8) ((msg->param1 >> 8) & 0xff));
         dev = q->vhci->devices[devid];
         if (!dev || (dev->tq_mask & BIT(endp)) == 0) {

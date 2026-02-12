@@ -71,6 +71,7 @@ void bce_unmap_dma_buffer(struct device *dev, struct bce_dma_buffer *buf)
 {
     dma_unmap_sg(dev, buf->scatterlist.sgl, buf->scatterlist.nents, buf->direction);
     bce_unmap_segement_list(dev, buf->seglist_hostinfo);
+    sg_free_table(&buf->scatterlist);
 }
 
 
@@ -88,6 +89,8 @@ static int bce_alloc_scatterlist_from_vm(struct sg_table *tbl, void *data, size_
         pages = vmalloc(page_count * sizeof(struct page *));
     else
         pages = kmalloc(page_count * sizeof(struct page *), GFP_KERNEL);
+    if (!pages)
+        return -ENOMEM;
 
     for (i = 0; i < page_count; i++)
         pages[i] = vmalloc_to_page((void *) ((start_page + i) * PAGE_SIZE));
@@ -183,6 +186,7 @@ static void bce_unmap_segement_list(struct device *dev, struct bce_segment_list_
     while (list) {
         if (list->dma_start != DMA_MAPPING_ERROR)
             dma_unmap_single(dev, list->dma_start, list->page_count * PAGE_SIZE, DMA_TO_DEVICE);
+        free_pages((unsigned long)list->page_start, get_order(list->page_count * PAGE_SIZE));
         next = list->next;
         kfree(list);
         list = next;
