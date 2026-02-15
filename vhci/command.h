@@ -38,6 +38,9 @@ enum bce_vhci_command {
     BCE_VHCI_CMD_ENDPOINT_SET_STATE = 0x42,
     BCE_VHCI_CMD_ENDPOINT_RESET = 0x44,
 
+    /* System events (device to host only) */
+    BCE_VHCI_CMD_CONTROLLER_RESET_NOTIFY = 0x50,
+
     /* Device to host only */
     BCE_VHCI_CMD_ENDPOINT_REQUEST_STATE = 0x43,
     BCE_VHCI_CMD_TRANSFER_REQUEST = 0x1000,

@@ -1,6 +1,7 @@
 #include "queue.h"
 #include "vhci.h"
 #include "../apple_bce.h"
+#include <linux/workqueue.h>
 
 
 static void bce_vhci_message_queue_completion(struct bce_queue_sq *sq);
@@ -240,11 +241,14 @@ static int __bce_vhci_command_queue_execute(struct bce_vhci_command_queue *cq, s
         bce_vhci_message_queue_write(cq->mq, &creq);
 
         if (!wait_for_completion_timeout(&c->completion, 1000)) {
-            pr_err("bce-vhci: Possible desync, cmd cancel timed out\n");
+            struct bce_vhci *vhci = container_of(cq, struct bce_vhci, cq);
+            pr_err("bce-vhci: Possible desync, cmd cancel timed out — scheduling recovery\n");
 
             spin_lock(&cq->completion_lock);
             c->result = NULL;
             spin_unlock(&cq->completion_lock);
+
+            schedule_work(&vhci->w_recovery);
             return -ETIMEDOUT;
         }
         if ((res->cmd & ~0x8000) == creq.cmd)

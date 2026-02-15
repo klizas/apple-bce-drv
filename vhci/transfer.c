@@ -256,6 +256,13 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
     spin_unlock_irqrestore(&q->urb_lock, flags);
     bce_vhci_transfer_queue_remove_pending(q);
 
+    /* During recovery, skip T2 commands and queue flushes entirely.
+     * Recovery resets the controller and re-enumerates all devices,
+     * so per-endpoint pauses are pointless and would just burn
+     * timeouts against an unresponsive T2. */
+    if (atomic_read(&q->vhci->recovering))
+        return 0;
+
     /* Wait for pending output transfers to complete before pausing/flushing.
      * Ensures commands like keyboard backlight off reach T2 before flush
      * aborts remaining transfers. */
@@ -274,12 +281,15 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
         }
     }
 
-    if ((status = bce_vhci_cmd_endpoint_set_state(
-            &q->vhci->cq, q->dev_addr, q->endp_addr, BCE_VHCI_ENDPOINT_PAUSED, &q->state))) {
-        pr_err("bce-vhci: [%02x] pause: set_state failed (%d)\n", q->endp_addr, status);
-        return status;
-    }
-    if (q->state != BCE_VHCI_ENDPOINT_PAUSED) {
+    status = bce_vhci_cmd_endpoint_set_state(
+            &q->vhci->cq, q->dev_addr, q->endp_addr, BCE_VHCI_ENDPOINT_PAUSED, &q->state);
+    if (status) {
+        /* Fall through to flush. Returning error here prevents paused_by
+         * from being set, causing the deferred pause worker to retry in a
+         * loop where each attempt burns a full T2 command timeout (~3s). */
+        pr_warn("bce-vhci: [%02x] pause: set_state failed (%d), continuing with local cleanup\n",
+                q->endp_addr, status);
+    } else if (q->state != BCE_VHCI_ENDPOINT_PAUSED) {
         pr_err("bce-vhci: [%02x] pause: unexpected state %d\n", q->endp_addr, q->state);
         return -EINVAL;
     }
@@ -397,11 +407,12 @@ static void bce_vhci_transfer_queue_deferred_pause_w(struct work_struct *work)
     struct bce_vhci_transfer_queue *q =
         container_of(work, struct bce_vhci_transfer_queue, w_pause);
 
-    /* Drain all pending pause requests. bce_vhci_transfer_queue_pause()
-     * holds pause_lock and checks paused_by — if already paused, it's a
-     * no-op that just adds the flag. So multiple calls are safe. */
-    while (atomic_dec_if_positive(&q->pending_pause_count) >= 0)
+    if (atomic_dec_if_positive(&q->pending_pause_count) >= 0) {
         bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+        /* Once paused, remaining counts are redundant — drain them. */
+        while (atomic_dec_if_positive(&q->pending_pause_count) >= 0)
+            ;
+    }
 }
 
 static void bce_vhci_transfer_queue_init_pending_urbs(struct bce_vhci_transfer_queue *q)

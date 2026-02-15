@@ -217,10 +217,8 @@ static snd_pcm_uframes_t aaudio_pcm_pointer(struct snd_pcm_substream *substream)
     snd_pcm_sframes_t frames;
     snd_pcm_sframes_t buffer_time_length;
 
-    if (!stream->started || stream->waiting_for_first_ts) {
-        pr_warn("aaudio_pcm_pointer while not started\n");
+    if (!stream->started || stream->waiting_for_first_ts)
         return 0;
-    }
 
     /* Approximate the pointer based on the last received timestamp */
     time_from_start = ktime_get_boottime() - stream->remote_timestamp;

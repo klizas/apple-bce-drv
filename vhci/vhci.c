@@ -17,6 +17,11 @@ static int bce_vhci_create_message_queues(struct bce_vhci *vhci);
 static void bce_vhci_destroy_message_queues(struct bce_vhci *vhci);
 static void bce_vhci_handle_firmware_events_w(struct work_struct *ws);
 static void bce_vhci_firmware_event_completion(struct bce_queue_sq *sq);
+static void bce_vhci_recovery_w(struct work_struct *ws);
+static void bce_vhci_watchdog_w(struct work_struct *ws);
+
+#define BCE_VHCI_RECOVERY_COOLDOWN_SECS 10
+#define BCE_VHCI_WATCHDOG_INTERVAL_SECS 30
 
 int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
 {
@@ -40,6 +45,10 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
 
     vhci->tq_state_wq = alloc_ordered_workqueue("bce-vhci-tq-state", 0);
     INIT_WORK(&vhci->w_fw_events, bce_vhci_handle_firmware_events_w);
+    INIT_WORK(&vhci->w_recovery, bce_vhci_recovery_w);
+    INIT_DELAYED_WORK(&vhci->recovery_watchdog, bce_vhci_watchdog_w);
+    atomic_set(&vhci->recovering, 0);
+    vhci->last_recovery_jiffies = 0;
 
     vhci->hcd = usb_create_hcd(&bce_vhci_driver, vhci->vdev, "bce-vhci");
     if (!vhci->hcd) {
@@ -73,6 +82,8 @@ fail_dev:
 void bce_vhci_destroy(struct bce_vhci *vhci)
 {
     usb_remove_hcd(vhci->hcd);
+    cancel_delayed_work_sync(&vhci->recovery_watchdog);
+    cancel_work_sync(&vhci->w_recovery);
     cancel_work_sync(&vhci->w_fw_events);
     flush_workqueue(vhci->tq_state_wq);
     destroy_workqueue(vhci->tq_state_wq);
@@ -104,12 +115,15 @@ int bce_vhci_start(struct usb_hcd *hcd)
         port_mask >>= 1;
     }
     vhci->port_count = port_no;
+    schedule_delayed_work(&vhci->recovery_watchdog,
+                          msecs_to_jiffies(BCE_VHCI_WATCHDOG_INTERVAL_SECS * 1000));
     return 0;
 }
 
 void bce_vhci_stop(struct usb_hcd *hcd)
 {
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
+    cancel_delayed_work_sync(&vhci->recovery_watchdog);
     bce_vhci_cmd_controller_disable(&vhci->cq);
 }
 
@@ -993,6 +1007,12 @@ static void bce_vhci_handle_system_event(struct bce_vhci_event_queue *q, struct 
         pr_info("bce-vhci: T2 initiated port %d suspend (status=0x%llx)\n", port, msg->param2);
         break;
 
+    case BCE_VHCI_CMD_CONTROLLER_RESET_NOTIFY:
+        pr_warn("bce-vhci: T2 controller reset notification (p1=0x%x p2=0x%llx), scheduling recovery\n",
+                msg->param1, msg->param2);
+        schedule_work(&q->vhci->w_recovery);
+        break;
+
     default:
         pr_warn("bce-vhci: Unhandled system event: %x s=%x p1=%x p2=%llx\n",
                 msg->cmd, msg->status, msg->param1, msg->param2);
@@ -1027,6 +1047,140 @@ static void bce_vhci_handle_usb_event(struct bce_vhci_event_queue *q, struct bce
 }
 
 
+
+static void bce_vhci_recovery_w(struct work_struct *ws)
+{
+    struct bce_vhci *vhci = container_of(ws, struct bce_vhci, w_recovery);
+    struct usb_hcd *hcd = vhci->hcd;
+    int i, j, status;
+    struct bce_vhci_device *vdev;
+    unsigned long flags;
+
+    /* Rate limit: at most one recovery per cooldown period */
+    if (vhci->last_recovery_jiffies &&
+        time_before(jiffies, vhci->last_recovery_jiffies +
+                    msecs_to_jiffies(BCE_VHCI_RECOVERY_COOLDOWN_SECS * 1000))) {
+        pr_info("bce-vhci: recovery skipped (cooldown)\n");
+        return;
+    }
+
+    /* Prevent concurrent recovery */
+    if (atomic_cmpxchg(&vhci->recovering, 0, 1) != 0) {
+        pr_info("bce-vhci: recovery already in progress\n");
+        return;
+    }
+
+    vhci->last_recovery_jiffies = jiffies;
+    pr_warn("bce-vhci: === VHCI desync recovery starting ===\n");
+
+    /* Phase 1: Mark all transfer queues inactive + cancel in-flight URBs */
+    for (i = 0; i < 16; i++) {
+        if (!vhci->port_to_device[i])
+            continue;
+        vdev = vhci->devices[vhci->port_to_device[i]];
+        if (!vdev)
+            continue;
+        for (j = 0; j < 32; j++) {
+            if (!(vdev->tq_mask & BIT(j)))
+                continue;
+            spin_lock_irqsave(&vdev->tq[j].urb_lock, flags);
+            vdev->tq[j].active = false;
+            spin_unlock_irqrestore(&vdev->tq[j].urb_lock, flags);
+            bce_vhci_transfer_queue_cancel_all(&vdev->tq[j]);
+        }
+    }
+
+    flush_workqueue(vhci->tq_state_wq);
+
+    /* Phase 2: Attempt controller pause (may fail — that's expected).
+     * Use SHORT timeout: T2 is likely desynced so this will timeout anyway. */
+    {
+        struct bce_vhci_message cmd = { .cmd = BCE_VHCI_CMD_CONTROLLER_PAUSE }, res;
+        status = bce_vhci_command_queue_execute(&vhci->cq, &cmd, &res,
+                                                BCE_VHCI_CMD_TIMEOUT_SHORT);
+    }
+    if (status)
+        pr_info("bce-vhci: recovery: controller_pause returned %d (expected if desynced)\n", status);
+
+    /* Phase 3: Flush event queues to drain stale completions */
+    bce_vhci_event_queue_pause(&vhci->ev_commands);
+    bce_vhci_event_queue_pause(&vhci->ev_system);
+    bce_vhci_event_queue_pause(&vhci->ev_isochronous);
+    bce_vhci_event_queue_pause(&vhci->ev_interrupt);
+    bce_vhci_event_queue_pause(&vhci->ev_asynchronous);
+
+    /* Flush stale async DMA submissions */
+    bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_asynchronous.sq->qid);
+
+    /* Resume event queues */
+    bce_vhci_event_queue_resume(&vhci->ev_commands);
+    bce_vhci_event_queue_resume(&vhci->ev_system);
+    bce_vhci_event_queue_resume(&vhci->ev_asynchronous);
+    bce_vhci_event_queue_resume(&vhci->ev_isochronous);
+    bce_vhci_event_queue_resume(&vhci->ev_interrupt);
+
+    /* Phase 4: Restart controller.
+     * Use MEDIUM timeout: after flushing, T2 should respond quickly. */
+    {
+        struct bce_vhci_message cmd = { .cmd = BCE_VHCI_CMD_CONTROLLER_START }, res;
+        status = bce_vhci_command_queue_execute(&vhci->cq, &cmd, &res,
+                                                BCE_VHCI_CMD_TIMEOUT_MEDIUM);
+    }
+    if (status) {
+        pr_err("bce-vhci: recovery: controller_start failed (%d), giving up\n", status);
+        goto out;
+    }
+
+    /* Phase 5: Signal USB core to re-enumerate all active ports.
+     * Phase 1 already marked queues inactive and cancelled URBs.
+     * Phase 4 restarted the controller so T2 can process commands.
+     * Let USB core's normal path handle the rest:
+     *   free_device  -> destroy TQs + device_destroy
+     *   reset_device -> port_reset
+     *   enable_device -> device_create + EP0 */
+    for (i = 0; i < 16; i++) {
+        if (!vhci->port_to_device[i])
+            continue;
+        pr_info("bce-vhci: recovery: port %d signaling re-enumeration\n", i);
+        set_bit(i, &vhci->port_reenumerate_mask);
+        set_bit(i, &vhci->port_resume_mask);
+    }
+
+    /* Phase 6: Notify USB core to re-enumerate */
+    usb_hcd_poll_rh_status(hcd);
+
+    pr_warn("bce-vhci: === VHCI desync recovery complete ===\n");
+
+out:
+    atomic_set(&vhci->recovering, 0);
+
+    /* Restart watchdog */
+    schedule_delayed_work(&vhci->recovery_watchdog,
+                          msecs_to_jiffies(BCE_VHCI_WATCHDOG_INTERVAL_SECS * 1000));
+}
+
+static void bce_vhci_watchdog_w(struct work_struct *ws)
+{
+    struct bce_vhci *vhci = container_of(ws, struct bce_vhci, recovery_watchdog.work);
+    u32 port_status;
+    int status;
+
+    /* Don't probe during recovery */
+    if (atomic_read(&vhci->recovering))
+        goto reschedule;
+
+    /* Probe port 0 — if the command times out, the VHCI is likely desynced */
+    status = bce_vhci_cmd_port_status(&vhci->cq, 0, 0, &port_status);
+    if (status == -ETIMEDOUT) {
+        pr_warn("bce-vhci: watchdog: port_status probe timed out, scheduling recovery\n");
+        schedule_work(&vhci->w_recovery);
+        return; /* Recovery worker will restart watchdog */
+    }
+
+reschedule:
+    schedule_delayed_work(&vhci->recovery_watchdog,
+                          msecs_to_jiffies(BCE_VHCI_WATCHDOG_INTERVAL_SECS * 1000));
+}
 
 static const struct hc_driver bce_vhci_driver = {
         .description = "bce-vhci",

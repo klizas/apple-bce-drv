@@ -1,6 +1,7 @@
 #ifndef BCE_VHCI_H
 #define BCE_VHCI_H
 
+#include <linux/atomic.h>
 #include "queue.h"
 #include "transfer.h"
 
@@ -37,6 +38,10 @@ struct bce_vhci {
     struct bce_vhci_device *devices[16];
     struct workqueue_struct *tq_state_wq;
     struct work_struct w_fw_events;
+    struct work_struct w_recovery;
+    struct delayed_work recovery_watchdog;
+    atomic_t recovering;
+    unsigned long last_recovery_jiffies;
     unsigned long port_resume_mask;        /* Ports with connection change (accessed atomically) */
     unsigned long port_reenumerate_mask;   /* Ports where GetPortStatus hides CONNECTION to force disconnect+re-enum */
     unsigned long port_suppress_connect_mask; /* Ports where PORT_CONNECT events are suppressed during session refresh */
