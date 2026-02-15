@@ -162,6 +162,8 @@ int bce_reserve_submission(struct bce_queue_sq *sq, unsigned long *timeout)
     return 0;
 }
 
+EXPORT_SYMBOL_GPL(bce_reserve_submission);
+
 void bce_cancel_submission_reservation(struct bce_queue_sq *sq)
 {
     atomic_inc(&sq->available_commands);
@@ -173,12 +175,14 @@ void *bce_next_submission(struct bce_queue_sq *sq)
     sq->tail = (sq->tail + 1) % sq->el_count;
     return ret;
 }
+EXPORT_SYMBOL_GPL(bce_next_submission);
 
 void bce_submit_to_device(struct bce_queue_sq *sq)
 {
     mb();
     iowrite32(sq->tail, (u32 *) ((u8 *) sq->reg_mem_dma +  REG_DOORBELL_BASE) + sq->qid);
 }
+EXPORT_SYMBOL_GPL(bce_submit_to_device);
 
 void bce_notify_submission_complete(struct bce_queue_sq *sq)
 {
@@ -188,6 +192,7 @@ void bce_notify_submission_complete(struct bce_queue_sq *sq)
         complete(&sq->available_command_completion);
     }
 }
+EXPORT_SYMBOL_GPL(bce_notify_submission_complete);
 
 void bce_set_submission_single(struct bce_qe_submission *element, dma_addr_t addr, size_t size)
 {
@@ -195,6 +200,7 @@ void bce_set_submission_single(struct bce_qe_submission *element, dma_addr_t add
     element->length = size;
     element->segl_addr = element->segl_length = 0;
 }
+EXPORT_SYMBOL_GPL(bce_set_submission_single);
 
 static void bce_cmdq_completion(struct bce_queue_sq *q);
 
@@ -298,14 +304,14 @@ static __always_inline int bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bc
     return 0;
 }
 
-u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, bool isdirout)
+u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, u16 flags)
 {
     struct bce_queue_cmdq_result_el res;
     struct bce_cmdq_register_memory_queue_cmd *cmd = bce_cmd_start(cmdq, &res);
     if (!cmd)
         return (u32) -1;
     cmd->cmd = BCE_CMD_REGISTER_MEMORY_QUEUE;
-    cmd->flags = (u16) ((name ? 2 : 0) | (isdirout ? 1 : 0));
+    cmd->flags = flags;
     cmd->qid = cfg->qid;
     cmd->el_count = cfg->el_count;
     cmd->vector_or_cq = cfg->vector_or_cq;
@@ -351,6 +357,7 @@ u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
         return (u32) -1;
     return res.status;
 }
+EXPORT_SYMBOL_GPL(bce_cmd_flush_memory_queue);
 
 
 struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
@@ -368,7 +375,7 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
     if (!cq)
         return NULL;
     bce_get_cq_memcfg(cq, &cfg);
-    if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, NULL, false) != 0) {
+    if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, NULL, 0) != 0) {
         pr_err("apple-bce: CQ registration failed (%i)", qid);
         bce_free_cq(dev, cq);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
@@ -382,12 +389,15 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
     return cq;
 }
 
+EXPORT_SYMBOL_GPL(bce_create_cq);
+
 struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name, u32 el_count,
         int direction, bce_sq_completion compl, void *userdata)
 {
     struct bce_queue_sq *sq;
     struct bce_queue_memcfg cfg;
     int qid;
+    u16 flags;
     if (cq == NULL)
         return NULL; /* cq can not be null */
     if (name == NULL)
@@ -405,7 +415,8 @@ struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queu
     if (!sq)
         return NULL;
     bce_get_sq_memcfg(sq, cq, &cfg);
-    if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, name, direction != DMA_FROM_DEVICE) != 0) {
+    flags = (u16) ((name ? 2 : 0) | ((direction != DMA_FROM_DEVICE) ? 1 : 0));
+    if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, name, flags) != 0) {
         pr_err("apple-bce: SQ registration failed (%i)", qid);
         bce_free_sq(dev, sq);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
@@ -420,6 +431,45 @@ struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queu
     spin_unlock(&dev->queues_lock);
     return sq;
 }
+
+struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name,
+        u32 el_count, u16 flags, bce_sq_completion compl, void *userdata)
+{
+    struct bce_queue_sq *sq;
+    struct bce_queue_memcfg cfg;
+    int qid;
+    if (cq == NULL)
+        return NULL;
+    if (name == NULL)
+        return NULL;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
+    qid = ida_simple_get(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX, GFP_KERNEL);
+#else
+    qid = ida_alloc_range(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX - 1, GFP_KERNEL);
+#endif
+    if (qid < 0)
+        return NULL;
+    sq = bce_alloc_sq(dev, qid, sizeof(struct bce_qe_submission), el_count, compl, userdata);
+    if (!sq)
+        return NULL;
+    bce_get_sq_memcfg(sq, cq, &cfg);
+    if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, name, flags) != 0) {
+        pr_err("apple-bce: SQ registration failed (%i)", qid);
+        bce_free_sq(dev, sq);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
+        ida_simple_remove(&dev->queue_ida, (uint) qid);
+#else
+        ida_free(&dev->queue_ida, (uint) qid);
+#endif
+        return NULL;
+    }
+    spin_lock(&dev->queues_lock);
+    dev->queues[qid] = (struct bce_queue *) sq;
+    spin_unlock(&dev->queues_lock);
+    return sq;
+}
+
+EXPORT_SYMBOL_GPL(bce_create_sq_with_flags);
 
 void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
 {
@@ -436,6 +486,8 @@ void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
     bce_free_cq(dev, cq);
 }
 
+EXPORT_SYMBOL_GPL(bce_destroy_cq);
+
 void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq)
 {
     if (!dev->is_being_removed && bce_cmd_unregister_memory_queue(dev->cmd_cmdq, (u16) sq->qid))
@@ -450,3 +502,4 @@ void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq)
 #endif
     bce_free_sq(dev, sq);
 }
+EXPORT_SYMBOL_GPL(bce_destroy_sq);

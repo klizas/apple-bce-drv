@@ -8,6 +8,7 @@ static dev_t bce_chrdev;
 static struct class *bce_class;
 
 struct apple_bce_device *global_bce;
+EXPORT_SYMBOL_GPL(global_bce);
 
 static int bce_create_command_queues(struct apple_bce_device *bce);
 static void bce_free_command_queues(struct apple_bce_device *bce);

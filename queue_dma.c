@@ -49,6 +49,8 @@ int bce_map_dma_buffer_vm(struct device *dev, struct bce_dma_buffer *buf, void *
     return 0;
 }
 
+EXPORT_SYMBOL_GPL(bce_map_dma_buffer_vm);
+
 int bce_map_dma_buffer_km(struct device *dev, struct bce_dma_buffer *buf, void *data, size_t len,
                           enum dma_data_direction dir)
 {
@@ -73,6 +75,7 @@ void bce_unmap_dma_buffer(struct device *dev, struct bce_dma_buffer *buf)
     bce_unmap_segement_list(dev, buf->seglist_hostinfo);
     sg_free_table(&buf->scatterlist);
 }
+EXPORT_SYMBOL_GPL(bce_unmap_dma_buffer);
 
 
 static int bce_alloc_scatterlist_from_vm(struct sg_table *tbl, void *data, size_t len)
@@ -156,6 +159,13 @@ static struct bce_segment_list_element_hostinfo *bce_map_segment_list(
         el->addr = sg->dma_address;
         el->length = sg->length;
         header->data_size += el->length;
+        el++;
+    }
+
+    /* Fix up element_count in the last segment page to reflect actual usage */
+    if (header != &theader) {
+        struct bce_segment_list_element *first_el = (void *) (header + 1);
+        header->element_count = el - first_el;
     }
 
     /* DMA map */
@@ -169,6 +179,8 @@ static struct bce_segment_list_element_hostinfo *bce_map_segment_list(
             header = pout->page_start;
             header->next_segl_addr = out->dma_start;
             header->next_segl_length = out->page_count * PAGE_SIZE;
+            dma_sync_single_for_device(dev, pout->dma_start,
+                                       pout->page_count * PAGE_SIZE, DMA_TO_DEVICE);
         }
         pout = out;
         out = out->next;
@@ -184,9 +196,11 @@ static void bce_unmap_segement_list(struct device *dev, struct bce_segment_list_
 {
     struct bce_segment_list_element_hostinfo *next;
     while (list) {
+        size_t i;
         if (list->dma_start != DMA_MAPPING_ERROR)
             dma_unmap_single(dev, list->dma_start, list->page_count * PAGE_SIZE, DMA_TO_DEVICE);
-        free_pages((unsigned long)list->page_start, get_order(list->page_count * PAGE_SIZE));
+        for (i = 0; i < list->page_count; i++)
+            free_page((unsigned long)list->page_start + i * PAGE_SIZE);
         next = list->next;
         kfree(list);
         list = next;
@@ -217,8 +231,9 @@ int bce_set_submission_buf(struct bce_qe_submission *element, struct bce_dma_buf
     if (!seg)
         return -EINVAL;
     element->addr = offset;
-    element->length = buf->scatterlist.sgl->dma_length;
+    element->length = length;
     element->segl_addr = seg->dma_start;
     element->segl_length = seg->page_count * PAGE_SIZE;
     return 0;
 }
+EXPORT_SYMBOL_GPL(bce_set_submission_buf);

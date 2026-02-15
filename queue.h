@@ -164,7 +164,7 @@ void bce_set_submission_single(struct bce_qe_submission *element, dma_addr_t add
 struct bce_queue_cmdq *bce_alloc_cmdq(struct apple_bce_device *dev, int qid, u32 el_count);
 void bce_free_cmdq(struct apple_bce_device *dev, struct bce_queue_cmdq *cmdq);
 
-u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, bool isdirout);
+u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, u16 flags);
 u32 bce_cmd_unregister_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
 u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
 
@@ -174,6 +174,8 @@ u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
 struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count);
 struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name, u32 el_count,
         int direction, bce_sq_completion compl, void *userdata);
+struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name,
+        u32 el_count, u16 flags, bce_sq_completion compl, void *userdata);
 void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq);
 void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq);
 
