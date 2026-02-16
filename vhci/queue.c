@@ -2,6 +2,7 @@
 #include "vhci.h"
 #include "../apple_bce.h"
 #include <linux/workqueue.h>
+#include <linux/delay.h>
 
 
 static void bce_vhci_message_queue_completion(struct bce_queue_sq *sq);
@@ -169,8 +170,15 @@ void bce_vhci_event_queue_resume(struct bce_vhci_event_queue *q)
 {
     WRITE_ONCE(q->draining, false);
     if (atomic_read(&q->sq->available_commands) != q->sq->el_count - 1) {
-        pr_err("bce-vhci: resume of a queue with pending submissions\n");
-        return;
+        pr_warn("bce-vhci: resume: event queue not fully drained, flushing\n");
+        bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, q->sq->qid);
+        /* Wait briefly for stale completions to arrive */
+        msleep(50);
+        if (atomic_read(&q->sq->available_commands) != q->sq->el_count - 1) {
+            pr_err("bce-vhci: resume: event queue still has %d pending after flush\n",
+                   q->sq->el_count - 1 - atomic_read(&q->sq->available_commands));
+            return;
+        }
     }
     bce_vhci_event_queue_submit_pending(q, VHCI_EVENT_PENDING_COUNT);
 }

@@ -222,8 +222,10 @@ static snd_pcm_uframes_t aaudio_pcm_pointer(struct snd_pcm_substream *substream)
 
     /* Approximate the pointer based on the last received timestamp */
     time_from_start = ktime_get_boottime() - stream->remote_timestamp;
+    if (ktime_to_ns(time_from_start) < 0)
+        return 0;
     buffer_time_length = NSEC_PER_SEC * substream->runtime->buffer_size / substream->runtime->rate;
-    frames = (ktime_to_ns(time_from_start) % buffer_time_length) * substream->runtime->buffer_size / buffer_time_length;
+    frames = (ktime_to_ns(time_from_start) % buffer_time_length) * (snd_pcm_sframes_t)substream->runtime->buffer_size / buffer_time_length;
     if (ktime_to_ns(time_from_start) < buffer_time_length) {
         if (frames < stream->frame_min)
             frames = stream->frame_min;

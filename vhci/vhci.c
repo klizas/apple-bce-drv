@@ -446,6 +446,7 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
     unsigned long flags;
     struct bce_vhci_transfer_queue *tq;
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
+    cancel_delayed_work_sync(&vhci->recovery_watchdog);
     pr_info("bce_vhci: suspend started\n");
     pr_info("bce_vhci: suspend: msg queue slots: cmd=%d/%d sys=%d/%d async=%d/%d int=%d/%d iso=%d/%d\n",
             atomic_read(&vhci->msg_commands.sq->available_commands), vhci->msg_commands.sq->el_count - 1,
@@ -693,6 +694,9 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
 
     if (need_poll)
         usb_hcd_poll_rh_status(vhci->hcd);
+
+    schedule_delayed_work(&vhci->recovery_watchdog,
+                          msecs_to_jiffies(BCE_VHCI_WATCHDOG_INTERVAL_SECS * 1000));
 
     pr_info("bce_vhci: resume done (cycle %u)\n", resume_cycle);
     return 0;
