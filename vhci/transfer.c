@@ -39,12 +39,15 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
     q->max_active_requests = 1;
     if (usb_endpoint_type(&endp->desc) == USB_ENDPOINT_XFER_BULK)
         q->max_active_requests = BCE_VHCI_BULK_MAX_ACTIVE_URBS;
+    else if (usb_endpoint_type(&endp->desc) == USB_ENDPOINT_XFER_ISOC)
+        q->max_active_requests = BCE_VHCI_ISOC_MAX_ACTIVE_URBS;
     q->remaining_active_requests = q->max_active_requests;
     q->cq = bce_create_cq(vhci->dev, 0x100);
     INIT_WORK(&q->w_reset, bce_vhci_transfer_queue_reset_w);
     INIT_WORK(&q->w_resume, bce_vhci_transfer_queue_deferred_resume_w);
     INIT_WORK(&q->w_pause, bce_vhci_transfer_queue_deferred_pause_w);
     atomic_set(&q->pending_pause_count, 0);
+    q->ghost_in_count = 0;
     q->sq_in = NULL;
     if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) {
         snprintf(name, sizeof(name), "VHC1-%i-%02x", dev_addr, 0x80 | usb_endpoint_num(&endp->desc));
@@ -218,8 +221,21 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
             bce_notify_submission_complete(sq);
             continue;
         }
+        /* Absorb ghost sq_in completions from cancelled IN URBs.
+         * T2 completed the DMA but the URB is already gone — just
+         * free the active slot and kick any INIT_PENDING URBs. */
+        if (!is_sq_out && q->ghost_in_count > 0) {
+            q->ghost_in_count--;
+            ++q->remaining_active_requests;
+            bce_vhci_transfer_queue_init_pending_urbs(q);
+            bce_notify_submission_complete(sq);
+            continue;
+        }
         if (list_empty(&q->endp->urb_list)) {
-            pr_err("bce-vhci: [%02x] Got a completion while no requests are pending\n", q->endp_addr);
+            /* Expected during teardown: URB was cancelled and unlinked from
+             * endp->urb_list, but T2's in-flight DMA completion arrived after.
+             * The completion slot is properly consumed below. */
+            pr_debug("bce-vhci: [%02x] Got a completion while no requests are pending\n", q->endp_addr);
             if (is_sq_out && atomic_dec_if_positive(&q->sq_out_pending) == 0)
                 wake_up(&q->sq_out_wait_queue);
             bce_notify_submission_complete(sq);
@@ -409,9 +425,10 @@ static void bce_vhci_transfer_queue_deferred_pause_w(struct work_struct *work)
 
     if (atomic_dec_if_positive(&q->pending_pause_count) >= 0) {
         bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
-        /* Once paused, remaining counts are redundant — drain them. */
         while (atomic_dec_if_positive(&q->pending_pause_count) >= 0)
             ;
+        if (!list_empty(&q->endp->urb_list))
+            bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
     }
 }
 
@@ -438,14 +455,6 @@ int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb, gfp_
     int status = 0;
     struct bce_vhci_urb *vurb;
 
-    /*
-     * Defer resume if queue was left paused from a previous URB cancel.
-     * Cannot resume synchronously because urb_enqueue may be called from
-     * atomic context (e.g. hid_start_in holds usbhid->lock spinlock).
-     */
-    if (READ_ONCE(q->paused_by) & BCE_VHCI_PAUSE_INTERNAL_WQ)
-        queue_work(q->vhci->tq_state_wq, &q->w_resume);
-
     vurb = kzalloc(sizeof(struct bce_vhci_urb), mem_flags);
     if (!vurb)
         return -ENOMEM;
@@ -471,9 +480,11 @@ int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb, gfp_
         else
             vurb->state = BCE_VHCI_URB_INIT_PENDING;
     } else {
+        vurb->state = BCE_VHCI_URB_INIT_PENDING;
         if (q->stalled)
             bce_vhci_transfer_queue_request_reset(q);
-        vurb->state = BCE_VHCI_URB_INIT_PENDING;
+        else if (READ_ONCE(q->paused_by) & BCE_VHCI_PAUSE_INTERNAL_WQ)
+            queue_work(q->vhci->tq_state_wq, &q->w_resume);
     }
     if (status) {
         usb_hcd_unlink_urb_from_ep(q->vhci->hcd, urb);
@@ -549,51 +560,93 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
 
     vurb->state = BCE_VHCI_URB_CANCELLED;
 
-    /* If the URB was already posted to T2, we need to pause the endpoint
-     * so T2 stops processing it. Defer the pause to the workqueue to avoid
-     * blocking the caller — T2 command timeouts can take seconds per
-     * endpoint, and multiple cancels compound into apparent system freezes. */
+    /* Free the active request slot so new URBs can use it. */
     if (old_state != BCE_VHCI_URB_INIT_PENDING) {
-        pr_debug("bce-vhci: [%02x] Cancelling URB (deferring pause)\n", q->endp_addr);
-        atomic_inc(&q->pending_pause_count);
-        ++q->remaining_active_requests;
+        if (old_state == BCE_VHCI_URB_WAITING_FOR_COMPLETION &&
+            vurb->dir == DMA_FROM_DEVICE && !vurb->is_control) {
+            /* Active IN data transfer: T2 has a pending
+             * TRANSFER_REQUEST + sq_in DMA in its pipeline.
+             * Don't free the slot yet — let the ghost completion
+             * handler absorb it.  This avoids pausing the endpoint
+             * (which disrupts the UVC bulk stream) or exceeding
+             * T2's max_active limit. */
+            q->ghost_in_count++;
+        } else {
+            ++q->remaining_active_requests;
+        }
     }
 
     usb_hcd_unlink_urb_from_ep(q->vhci->hcd, urb);
     urb->hcpriv = NULL;
 
-    spin_unlock_irqrestore(&q->urb_lock, flags);
+    /* Check if this was the last URB and ghosts are still in flight.
+     * If so, we must flush before returning so the caller (UVC) can
+     * safely free DMA buffers.  This only fires during teardown
+     * (STREAMOFF) — during normal streaming, new URBs keep the list
+     * non-empty so we never hit this path. */
+    {
+        bool need_flush = (q->ghost_in_count > 0 &&
+                           list_empty(&q->endp->urb_list));
+        spin_unlock_irqrestore(&q->urb_lock, flags);
 
-    /* Schedule the deferred pause BEFORE giveback — after giveback, USB core
-     * could tear down the device from another CPU, freeing q. */
-    if (old_state != BCE_VHCI_URB_INIT_PENDING)
-        queue_work(q->vhci->tq_state_wq, &q->w_pause);
+        usb_hcd_giveback_urb(q->vhci->hcd, urb, status);
+        kfree(vurb);
 
-    usb_hcd_giveback_urb(q->vhci->hcd, urb, status);
-
-    kfree(vurb);
+        if (need_flush) {
+            bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+            spin_lock_irqsave(&q->urb_lock, flags);
+            q->ghost_in_count = 0;
+            q->remaining_active_requests = q->max_active_requests;
+            spin_unlock_irqrestore(&q->urb_lock, flags);
+            bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+        }
+    }
 
     return 0;
+}
+
+/* Select the correct host-to-T2 message queue based on endpoint type.
+ * T2 expects isochronous transfer requests on VHC1HostIsochronousEvents.
+ * Interrupt, bulk, and control all go through VHC1HostAsynchronousEvents
+ * (T2 does NOT accept TRANSFER_REQUEST on VHC1HostInterruptEvents). */
+static void bce_vhci_get_msg_queue(struct bce_vhci_transfer_queue *q,
+        struct bce_vhci_message_queue **mq, struct spinlock **lock)
+{
+    struct bce_vhci *vhci = q->vhci;
+    switch (usb_endpoint_type(&q->endp->desc)) {
+    case USB_ENDPOINT_XFER_ISOC:
+        *mq = &vhci->msg_isochronous;
+        *lock = &vhci->msg_isochronous_lock;
+        break;
+    default:
+        *mq = &vhci->msg_asynchronous;
+        *lock = &vhci->msg_asynchronous_lock;
+        break;
+    }
 }
 
 static int bce_vhci_urb_data_transfer_in(struct bce_vhci_urb *urb, unsigned long *timeout)
 {
     struct bce_vhci_message msg;
     struct bce_qe_submission *s;
+    struct bce_vhci_message_queue *mq;
+    struct spinlock *mq_lock;
     u32 tr_len;
     int reservation1, reservation2 = -EFAULT;
 
     pr_debug("bce-vhci: [%02x] DMA from device %llx %x\n", urb->q->endp_addr,
              (u64) urb->urb->transfer_dma, urb->urb->transfer_buffer_length);
 
+    bce_vhci_get_msg_queue(urb->q, &mq, &mq_lock);
+
     /* Reserve both a message and a submission, so we don't run into issues later. */
-    reservation1 = bce_reserve_submission(urb->q->vhci->msg_asynchronous.sq, timeout);
+    reservation1 = bce_reserve_submission(mq->sq, timeout);
     if (!reservation1)
         reservation2 = bce_reserve_submission(urb->q->sq_in, timeout);
     if (reservation1 || reservation2) {
         pr_err("bce-vhci: Failed to reserve a submission for URB data transfer\n");
         if (!reservation1)
-            bce_cancel_submission_reservation(urb->q->vhci->msg_asynchronous.sq);
+            bce_cancel_submission_reservation(mq->sq);
         return -ENOMEM;
     }
 
@@ -601,13 +654,13 @@ static int bce_vhci_urb_data_transfer_in(struct bce_vhci_urb *urb, unsigned long
 
     tr_len = urb->urb->transfer_buffer_length - urb->send_offset;
 
-    spin_lock(&urb->q->vhci->msg_asynchronous_lock);
+    spin_lock(mq_lock);
     msg.cmd = BCE_VHCI_CMD_TRANSFER_REQUEST;
     msg.status = 0;
     msg.param1 = ((urb->urb->ep->desc.bEndpointAddress & 0x8Fu) << 8) | urb->q->dev_addr;
     msg.param2 = tr_len;
-    bce_vhci_message_queue_write(&urb->q->vhci->msg_asynchronous, &msg);
-    spin_unlock(&urb->q->vhci->msg_asynchronous_lock);
+    bce_vhci_message_queue_write(mq, &msg);
+    spin_unlock(mq_lock);
 
     s = bce_next_submission(urb->q->sq_in);
     bce_set_submission_single(s, urb->urb->transfer_dma + urb->send_offset, tr_len);
@@ -673,6 +726,24 @@ static int bce_vhci_urb_data_update(struct bce_vhci_urb *urb, struct bce_vhci_me
     return -EAGAIN;
 }
 
+static void bce_vhci_urb_iso_complete(struct bce_vhci_urb *vurb)
+{
+    struct urb *urb = vurb->urb;
+    int i;
+    u32 remaining = urb->actual_length;
+    u32 maxp = usb_endpoint_maxp(&urb->ep->desc);
+
+    urb->error_count = 0;
+    for (i = 0; i < urb->number_of_packets; i++) {
+        u32 pkt_len = min(maxp, remaining);
+        urb->iso_frame_desc[i].actual_length = pkt_len;
+        urb->iso_frame_desc[i].status = 0;
+        remaining -= pkt_len;
+    }
+
+    bce_vhci_urb_complete(vurb, 0);
+}
+
 static int bce_vhci_urb_data_transfer_completion(struct bce_vhci_urb *urb, struct bce_sq_completion_data *c)
 {
     if (urb->state == BCE_VHCI_URB_WAITING_FOR_COMPLETION) {
@@ -681,7 +752,10 @@ static int bce_vhci_urb_data_transfer_completion(struct bce_vhci_urb *urb, struc
             urb->urb->actual_length = (u32) urb->receive_offset;
             urb->state = BCE_VHCI_URB_DATA_TRANSFER_COMPLETE;
             if (!urb->is_control) {
-                bce_vhci_urb_complete(urb, 0);
+                if (urb->urb->number_of_packets > 0)
+                    bce_vhci_urb_iso_complete(urb);
+                else
+                    bce_vhci_urb_complete(urb, 0);
                 return -ENOENT;
             }
         }

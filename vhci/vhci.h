@@ -24,6 +24,8 @@ struct bce_vhci {
     struct bce_vhci_message_queue msg_interrupt;
     struct bce_vhci_message_queue msg_asynchronous;
     struct spinlock msg_asynchronous_lock;
+    struct spinlock msg_isochronous_lock;
+    struct spinlock msg_interrupt_lock;
     struct bce_vhci_command_queue cq;
     struct bce_queue_cq *ev_cq;
     struct bce_vhci_event_queue ev_commands;
@@ -42,6 +44,8 @@ struct bce_vhci {
     struct delayed_work recovery_watchdog;
     atomic_t recovering;
     unsigned long last_recovery_jiffies;
+    unsigned int recovery_fail_count;
+    bool controller_dead;                  /* Set after repeated recovery failures — all commands return -ENODEV */
     unsigned long port_resume_mask;        /* Ports with connection change (accessed atomically) */
     unsigned long port_reenumerate_mask;   /* Ports where GetPortStatus hides CONNECTION to force disconnect+re-enum */
     unsigned long port_suppress_connect_mask; /* Ports where PORT_CONNECT events are suppressed during session refresh */

@@ -46,6 +46,13 @@ struct bce_vhci_transfer_queue {
     struct work_struct w_resume;
     struct work_struct w_pause;
     atomic_t pending_pause_count;
+
+    /* Count of ghost sq_in completions to absorb from cancelled IN URBs.
+     * When an active IN URB is cancelled, its TRANSFER_REQUEST + DMA are
+     * still in T2's pipeline.  Instead of pausing the endpoint (which
+     * disrupts the UVC bulk stream), we let T2 complete the DMA and
+     * silently skip the result.  Protected by urb_lock. */
+    int ghost_in_count;
 };
 enum bce_vhci_urb_state {
     BCE_VHCI_URB_INIT_PENDING,

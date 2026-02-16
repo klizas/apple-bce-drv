@@ -22,6 +22,7 @@ static void bce_vhci_watchdog_w(struct work_struct *ws);
 
 #define BCE_VHCI_RECOVERY_COOLDOWN_SECS 10
 #define BCE_VHCI_WATCHDOG_INTERVAL_SECS 30
+#define BCE_VHCI_MAX_RECOVERY_FAILURES 3
 
 int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
 {
@@ -49,6 +50,8 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
     INIT_DELAYED_WORK(&vhci->recovery_watchdog, bce_vhci_watchdog_w);
     atomic_set(&vhci->recovering, 0);
     vhci->last_recovery_jiffies = 0;
+    vhci->recovery_fail_count = 0;
+    vhci->controller_dead = false;
 
     vhci->hcd = usb_create_hcd(&bce_vhci_driver, vhci->vdev, "bce-vhci");
     if (!vhci->hcd) {
@@ -181,6 +184,10 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
             ps->wPortStatus |= USB_PORT_STAT_POWER;
 
         if (!(bce_vhci_port_mask & BIT(wIndex)))
+            return 0;
+
+        /* Controller dead — report no connection so USB core stops polling */
+        if (READ_ONCE(vhci->controller_dead))
             return 0;
 
         /* If port needs forced re-enumeration, hide the connection so USB
@@ -554,11 +561,11 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
         return status;
     }
 
-    /* Flush stale DMA transfer submissions from before S3. Only
-     * msg_asynchronous carries DMA transfers; the other queues
-     * (commands, system, interrupt, isochronous) were proven to have
-     * no slot leaks across suspend/resume. */
+    /* Flush stale DMA transfer submissions from before S3.
+     * All three transfer message queues may have pending submissions. */
     bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_asynchronous.sq->qid);
+    bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_isochronous.sq->qid);
+    bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_interrupt.sq->qid);
 
     pr_debug("bce_vhci: resume: resuming ports\n");
     for (i = 0; i < 16; i++) {
@@ -794,6 +801,8 @@ static int bce_vhci_create_message_queues(struct bce_vhci *vhci)
         return -EINVAL;
     }
     spin_lock_init(&vhci->msg_asynchronous_lock);
+    spin_lock_init(&vhci->msg_isochronous_lock);
+    spin_lock_init(&vhci->msg_interrupt_lock);
     bce_vhci_command_queue_create(&vhci->cq, &vhci->msg_commands);
     return 0;
 }
@@ -1056,6 +1065,10 @@ static void bce_vhci_recovery_w(struct work_struct *ws)
     struct bce_vhci_device *vdev;
     unsigned long flags;
 
+    /* Don't attempt recovery if controller is permanently dead */
+    if (READ_ONCE(vhci->controller_dead))
+        return;
+
     /* Rate limit: at most one recovery per cooldown period */
     if (vhci->last_recovery_jiffies &&
         time_before(jiffies, vhci->last_recovery_jiffies +
@@ -1109,8 +1122,10 @@ static void bce_vhci_recovery_w(struct work_struct *ws)
     bce_vhci_event_queue_pause(&vhci->ev_interrupt);
     bce_vhci_event_queue_pause(&vhci->ev_asynchronous);
 
-    /* Flush stale async DMA submissions */
+    /* Flush stale DMA submissions on all three transfer message queues */
     bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_asynchronous.sq->qid);
+    bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_isochronous.sq->qid);
+    bce_cmd_flush_memory_queue(vhci->dev->cmd_cmdq, (u16) vhci->msg_interrupt.sq->qid);
 
     /* Resume event queues */
     bce_vhci_event_queue_resume(&vhci->ev_commands);
@@ -1127,9 +1142,21 @@ static void bce_vhci_recovery_w(struct work_struct *ws)
                                                 BCE_VHCI_CMD_TIMEOUT_MEDIUM);
     }
     if (status) {
-        pr_err("bce-vhci: recovery: controller_start failed (%d), giving up\n", status);
+        vhci->recovery_fail_count++;
+        if (vhci->recovery_fail_count >= BCE_VHCI_MAX_RECOVERY_FAILURES) {
+            pr_err("bce-vhci: recovery: controller_start failed (%d) — %u consecutive failures, marking controller DEAD\n",
+                   status, vhci->recovery_fail_count);
+            pr_err("bce-vhci: T2 VHCI is stuck. Reload apple-bce module or reboot to recover.\n");
+            WRITE_ONCE(vhci->controller_dead, true);
+        } else {
+            pr_err("bce-vhci: recovery: controller_start failed (%d), attempt %u/%u\n",
+                   status, vhci->recovery_fail_count, BCE_VHCI_MAX_RECOVERY_FAILURES);
+        }
         goto out;
     }
+
+    /* Recovery succeeded — reset failure counter */
+    vhci->recovery_fail_count = 0;
 
     /* Phase 5: Signal USB core to re-enumerate all active ports.
      * Phase 1 already marked queues inactive and cancelled URBs.
@@ -1154,9 +1181,10 @@ static void bce_vhci_recovery_w(struct work_struct *ws)
 out:
     atomic_set(&vhci->recovering, 0);
 
-    /* Restart watchdog */
-    schedule_delayed_work(&vhci->recovery_watchdog,
-                          msecs_to_jiffies(BCE_VHCI_WATCHDOG_INTERVAL_SECS * 1000));
+    /* Don't restart watchdog if controller is dead */
+    if (!READ_ONCE(vhci->controller_dead))
+        schedule_delayed_work(&vhci->recovery_watchdog,
+                              msecs_to_jiffies(BCE_VHCI_WATCHDOG_INTERVAL_SECS * 1000));
 }
 
 static void bce_vhci_watchdog_w(struct work_struct *ws)
@@ -1165,9 +1193,11 @@ static void bce_vhci_watchdog_w(struct work_struct *ws)
     u32 port_status;
     int status;
 
-    /* Don't probe during recovery */
+    /* Don't probe during recovery or if controller is dead */
     if (atomic_read(&vhci->recovering))
         goto reschedule;
+    if (READ_ONCE(vhci->controller_dead))
+        return;
 
     /* Probe port 0 — if the command times out, the VHCI is likely desynced */
     status = bce_vhci_cmd_port_status(&vhci->cq, 0, 0, &port_status);
