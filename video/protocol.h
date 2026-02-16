@@ -10,7 +10,9 @@
 /* Session token — returned by T2 in CodecID response[+0x18], written at +0x08 in all
  * subsequent commands. Previously hardcoded as 0xFEEDBEEF, but it is a dynamic value. */
 
-/* Maximum encoded output size per frame (2MB covers 4K keyframes at high bitrates) */
+/* Maximum encoded output size per frame (2MB covers 4K keyframes at high bitrates).
+ * 8 of these are allocated as contiguous DMA buffers, so keep this reasonable.
+ * Even at 100 Mbps / 30 fps, a worst-case IDR is well under 2 MB. */
 #define AVE_MAX_ENCODED_SIZE	(2 * 1024 * 1024)
 
 /* hvcC parsing constants (ISO/IEC 14496-15) */
@@ -100,6 +102,8 @@ void ave_build_cmd_encode_frame(void *buf, u64 frame_num, u32 width, u32 height,
 void ave_build_cmd_copy_property(void *buf, const char *name);
 void ave_build_cmd_set_property_bool(void *buf, const char *name, bool value);
 void ave_build_cmd_set_property_s32(void *buf, const char *name, s32 value);
+void ave_build_cmd_set_property_float32(void *buf, const char *name, u32 ieee754_bits);
+void ave_build_cmd_set_property_string(void *buf, const char *name, const char *value);
 void ave_build_cmd_prepare(void *buf);
 void ave_build_cmd_complete_frames(void *buf);
 void ave_build_cmd_end_session(void *buf);

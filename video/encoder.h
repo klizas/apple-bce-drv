@@ -10,6 +10,22 @@ enum ave_session_state {
 	AVE_STATE_ERROR,
 };
 
+struct ave_enc_params {
+	u32 bitrate;       /* AverageBitRate (bps) */
+	u32 fps_num;       /* Frame rate numerator */
+	u32 fps_den;       /* Frame rate denominator */
+	s32 gop_size;      /* MaxKeyFrameInterval (0 = firmware default) */
+	s32 bitrate_mode;  /* V4L2_MPEG_VIDEO_BITRATE_MODE_* (0=VBR, 1=CBR, 2=CQ) */
+	s32 quality;       /* Quality 1-100 for CQ mode (maps to 0.01-1.0 float) */
+	s32 min_qp;        /* MinAllowedFrameQP (0 = unset) */
+	s32 max_qp;        /* MaxAllowedFrameQP (0 = unset) */
+	s32 profile;       /* V4L2_MPEG_VIDEO_HEVC_PROFILE_* */
+	s32 level;         /* V4L2_MPEG_VIDEO_HEVC_LEVEL_* */
+	s32 color_primaries; /* ISO 23001-8 colour_primaries */
+	s32 ycbcr_matrix;    /* ISO 23001-8 matrix_coefficients */
+	s32 transfer_func;   /* ISO 23001-8 transfer_characteristics */
+};
+
 struct ave_session {
 	struct apple_bce_device *bce;
 	struct ave_queues queues;
@@ -41,7 +57,7 @@ struct ave_session {
 };
 
 int ave_session_setup(struct ave_session *session, struct apple_bce_device *bce,
-		      u32 width, u32 height, u32 bitrate, u32 fps_num, u32 fps_den);
+		      u32 width, u32 height, const struct ave_enc_params *params);
 void ave_session_teardown(struct ave_session *session);
 
 int ave_session_encode_frame(struct ave_session *session,

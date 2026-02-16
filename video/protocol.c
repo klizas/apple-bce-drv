@@ -776,6 +776,24 @@ void ave_build_cmd_set_property_s32(void *buf, const char *name, s32 value)
 	*(s32 *)(buf + 0x80) = value;
 }
 
+void ave_build_cmd_set_property_float32(void *buf, const char *name, u32 ieee754_bits)
+{
+	ave_build_cmd_set_property_common(buf, name);
+	*(u32 *)(buf + 0x74) = 0x00000004; /* type = Float32 */
+	*(u32 *)(buf + 0x78) = 0x00000004; /* length = 4 bytes */
+	*(u32 *)(buf + 0x80) = ieee754_bits;
+}
+
+void ave_build_cmd_set_property_string(void *buf, const char *name, const char *value)
+{
+	size_t len = strlen(value);
+
+	ave_build_cmd_set_property_common(buf, name);
+	*(u32 *)(buf + 0x74) = 0x00000006; /* type = CFString */
+	*(u32 *)(buf + 0x78) = len;
+	memcpy(buf + 0x80, value, min_t(size_t, len + 1, AVE_CMD_BUF_SIZE - 0x80));
+}
+
 void ave_build_cmd_prepare(void *buf)
 {
 	memset(buf, 0x00, AVE_CMD_BUF_SIZE);

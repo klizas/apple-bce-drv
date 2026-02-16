@@ -4,6 +4,7 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/vmalloc.h>
+#include <media/v4l2-ctrls.h>
 
 /*
  * Stamp session token at +0x08 in the command buffer.
@@ -42,22 +43,198 @@ static int ave_send_set_property_s32(struct ave_session *session, const char *na
 	return ave_cmd_send_sync(&session->queues, session->cmd_buf, AVE_CMD_BUF_SIZE);
 }
 
+static int ave_send_set_property_float32(struct ave_session *session, const char *name,
+					 u32 ieee754_bits)
+{
+	pr_debug("apple-ave: [setup] SetProperty (0x09): \"%s\" = float32(0x%08x)\n",
+		 name, ieee754_bits);
+	ave_build_cmd_set_property_float32(session->cmd_buf, name, ieee754_bits);
+	ave_stamp_session_token(session);
+	return ave_cmd_send_sync(&session->queues, session->cmd_buf, AVE_CMD_BUF_SIZE);
+}
+
+static int ave_send_set_property_string(struct ave_session *session, const char *name,
+					const char *value)
+{
+	pr_debug("apple-ave: [setup] SetProperty (0x09): \"%s\" = \"%s\"\n", name, value);
+	ave_build_cmd_set_property_string(session->cmd_buf, name, value);
+	ave_stamp_session_token(session);
+	return ave_cmd_send_sync(&session->queues, session->cmd_buf, AVE_CMD_BUF_SIZE);
+}
+
+/*
+ * IEEE 754 float32 lookup table for Quality percentages 0-100.
+ * Maps integer percentage to float32 bit pattern: table[n] = float32(n/100.0).
+ * Avoids kernel FPU — all values precomputed at compile time.
+ */
+static const u32 ave_quality_to_float32[101] = {
+	0x00000000, /* 0 = 0.00 */
+	0x3C23D70A, /* 1 = 0.01 */
+	0x3CA3D70A, /* 2 = 0.02 */
+	0x3CF5C28F, /* 3 = 0.03 */
+	0x3D23D70A, /* 4 = 0.04 */
+	0x3D4CCCCD, /* 5 = 0.05 */
+	0x3D75C28F, /* 6 = 0.06 */
+	0x3D8F5C29, /* 7 = 0.07 */
+	0x3DA3D70A, /* 8 = 0.08 */
+	0x3DB851EC, /* 9 = 0.09 */
+	0x3DCCCCCD, /* 10 = 0.10 */
+	0x3DE147AE, /* 11 = 0.11 */
+	0x3DF5C28F, /* 12 = 0.12 */
+	0x3E051EB8, /* 13 = 0.13 */
+	0x3E0F5C29, /* 14 = 0.14 */
+	0x3E19999A, /* 15 = 0.15 */
+	0x3E23D70A, /* 16 = 0.16 */
+	0x3E2E147B, /* 17 = 0.17 */
+	0x3E3851EC, /* 18 = 0.18 */
+	0x3E428F5C, /* 19 = 0.19 */
+	0x3E4CCCCD, /* 20 = 0.20 */
+	0x3E570A3D, /* 21 = 0.21 */
+	0x3E6147AE, /* 22 = 0.22 */
+	0x3E6B851F, /* 23 = 0.23 */
+	0x3E75C28F, /* 24 = 0.24 */
+	0x3E800000, /* 25 = 0.25 */
+	0x3E851EB8, /* 26 = 0.26 */
+	0x3E8A3D71, /* 27 = 0.27 */
+	0x3E8F5C29, /* 28 = 0.28 */
+	0x3E947AE1, /* 29 = 0.29 */
+	0x3E99999A, /* 30 = 0.30 */
+	0x3E9EB852, /* 31 = 0.31 */
+	0x3EA3D70A, /* 32 = 0.32 */
+	0x3EA8F5C3, /* 33 = 0.33 */
+	0x3EAE147B, /* 34 = 0.34 */
+	0x3EB33333, /* 35 = 0.35 */
+	0x3EB851EC, /* 36 = 0.36 */
+	0x3EBD70A4, /* 37 = 0.37 */
+	0x3EC28F5C, /* 38 = 0.38 */
+	0x3EC7AE14, /* 39 = 0.39 */
+	0x3ECCCCCD, /* 40 = 0.40 */
+	0x3ED1EB85, /* 41 = 0.41 */
+	0x3ED70A3D, /* 42 = 0.42 */
+	0x3EDC28F6, /* 43 = 0.43 */
+	0x3EE147AE, /* 44 = 0.44 */
+	0x3EE66666, /* 45 = 0.45 */
+	0x3EEB851F, /* 46 = 0.46 */
+	0x3EF0A3D7, /* 47 = 0.47 */
+	0x3EF5C28F, /* 48 = 0.48 */
+	0x3EFAE148, /* 49 = 0.49 */
+	0x3F000000, /* 50 = 0.50 */
+	0x3F028F5C, /* 51 = 0.51 */
+	0x3F051EB8, /* 52 = 0.52 */
+	0x3F07AE14, /* 53 = 0.53 */
+	0x3F0A3D71, /* 54 = 0.54 */
+	0x3F0CCCCD, /* 55 = 0.55 */
+	0x3F0F5C29, /* 56 = 0.56 */
+	0x3F11EB85, /* 57 = 0.57 */
+	0x3F147AE1, /* 58 = 0.58 */
+	0x3F170A3D, /* 59 = 0.59 */
+	0x3F19999A, /* 60 = 0.60 */
+	0x3F1C28F6, /* 61 = 0.61 */
+	0x3F1EB852, /* 62 = 0.62 */
+	0x3F2147AE, /* 63 = 0.63 */
+	0x3F23D70A, /* 64 = 0.64 */
+	0x3F266666, /* 65 = 0.65 */
+	0x3F28F5C3, /* 66 = 0.66 */
+	0x3F2B851F, /* 67 = 0.67 */
+	0x3F2E147B, /* 68 = 0.68 */
+	0x3F30A3D7, /* 69 = 0.69 */
+	0x3F333333, /* 70 = 0.70 */
+	0x3F35C28F, /* 71 = 0.71 */
+	0x3F3851EC, /* 72 = 0.72 */
+	0x3F3AE148, /* 73 = 0.73 */
+	0x3F3D70A4, /* 74 = 0.74 */
+	0x3F400000, /* 75 = 0.75 */
+	0x3F428F5C, /* 76 = 0.76 */
+	0x3F451EB8, /* 77 = 0.77 */
+	0x3F47AE14, /* 78 = 0.78 */
+	0x3F4A3D71, /* 79 = 0.79 */
+	0x3F4CCCCD, /* 80 = 0.80 */
+	0x3F4F5C29, /* 81 = 0.81 */
+	0x3F51EB85, /* 82 = 0.82 */
+	0x3F547AE1, /* 83 = 0.83 */
+	0x3F570A3D, /* 84 = 0.84 */
+	0x3F59999A, /* 85 = 0.85 */
+	0x3F5C28F6, /* 86 = 0.86 */
+	0x3F5EB852, /* 87 = 0.87 */
+	0x3F6147AE, /* 88 = 0.88 */
+	0x3F63D70A, /* 89 = 0.89 */
+	0x3F666666, /* 90 = 0.90 */
+	0x3F68F5C3, /* 91 = 0.91 */
+	0x3F6B851F, /* 92 = 0.92 */
+	0x3F6E147B, /* 93 = 0.93 */
+	0x3F70A3D7, /* 94 = 0.94 */
+	0x3F733333, /* 95 = 0.95 */
+	0x3F75C28F, /* 96 = 0.96 */
+	0x3F7851EC, /* 97 = 0.97 */
+	0x3F7AE148, /* 98 = 0.98 */
+	0x3F7D70A4, /* 99 = 0.99 */
+	0x3F800000, /* 100 = 1.00 */
+};
+
+/*
+ * Build a T2 ProfileLevel string from V4L2 HEVC profile and level enums.
+ * Format: "HEVC_{profile}_{level}" or "HEVC_{profile}_AutoLevel"
+ *
+ * The T2 encoder plugin accepts strings like:
+ *   "HEVC_Main_AutoLevel", "HEVC_Main_5.1", "HEVC_Main10_4.0"
+ */
+static void ave_build_profile_level_string(char *buf, size_t size, s32 profile, s32 level)
+{
+	const char *prof_str;
+	const char *lvl_str;
+
+	switch (profile) {
+	case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10:
+		prof_str = "Main10";
+		break;
+	case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE:
+		prof_str = "MainStill";
+		break;
+	default:
+		prof_str = "Main";
+		break;
+	}
+
+	switch (level) {
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_1:   lvl_str = "1.0"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_2:   lvl_str = "2.0"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_2_1: lvl_str = "2.1"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_3:   lvl_str = "3.0"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_3_1: lvl_str = "3.1"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_4:   lvl_str = "4.0"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_4_1: lvl_str = "4.1"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_5:   lvl_str = "5.0"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1: lvl_str = "5.1"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2: lvl_str = "5.2"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_6:   lvl_str = "6.0"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_6_1: lvl_str = "6.1"; break;
+	case V4L2_MPEG_VIDEO_HEVC_LEVEL_6_2: lvl_str = "6.2"; break;
+	default:                              lvl_str = NULL;   break;
+	}
+
+	if (lvl_str)
+		snprintf(buf, size, "HEVC_%s_%s", prof_str, lvl_str);
+	else
+		snprintf(buf, size, "HEVC_%s_AutoLevel", prof_str);
+}
+
 int ave_session_setup(struct ave_session *session, struct apple_bce_device *bce,
-		      u32 width, u32 height, u32 bitrate, u32 fps_num, u32 fps_den)
+		      u32 width, u32 height, const struct ave_enc_params *params)
 {
 	int status;
+	char profile_buf[64];
 
 	pr_debug("apple-ave: === SESSION SETUP START ===\n");
 	pr_debug("apple-ave: params: %ux%u @ %u bps, %u/%u fps\n",
-		 width, height, bitrate, fps_num, fps_den);
+		 width, height, params->bitrate, params->fps_num, params->fps_den);
 
 	memset(session, 0, sizeof(*session));
 	session->bce = bce;
 	session->width = width;
 	session->height = height;
-	session->bitrate = bitrate;
-	session->fps_num = fps_num;
-	session->fps_den = fps_den;
+	session->bitrate = params->bitrate;
+	session->fps_num = params->fps_num;
+	session->fps_den = params->fps_den;
 	session->state = AVE_STATE_IDLE;
 
 	session->cmd_buf = kmalloc(AVE_CMD_BUF_SIZE, GFP_KERNEL);
@@ -120,42 +297,95 @@ int ave_session_setup(struct ave_session *session, struct apple_bce_device *bce,
 		goto fail_queues;
 	}
 
-	/* Step 7: Cmd 0x09 — SetProperty "RealTime" = 1 */
-	pr_debug("apple-ave: [setup] Step 7: SetProperty RealTime = 1\n");
+	/* Step 7: SetProperty "RealTime" = true */
 	status = ave_send_set_property_bool(session, "RealTime", true);
 	if (status) {
 		pr_err("apple-ave: [setup] RealTime FAILED (%d)\n", status);
 		goto fail_queues;
 	}
 
-	/* Step 8: Cmd 0x09 — SetProperty "AllowFrameReordering" = false
-	 * We disable B-frames explicitly (see BPictures=0 after Prepare),
-	 * so no frame reordering is needed. */
-	pr_debug("apple-ave: [setup] Step 8: SetProperty AllowFrameReordering = 0\n");
+	/* Step 8: SetProperty "AllowFrameReordering" = false
+	 * B-frames require frame reordering, but our synchronous pipeline
+	 * (submit 1 frame, wait for output) cannot handle buffered/reordered
+	 * output. Keep disabled unconditionally. */
 	status = ave_send_set_property_bool(session, "AllowFrameReordering", false);
 	if (status) {
 		pr_err("apple-ave: [setup] AllowFrameReordering FAILED (%d)\n", status);
 		goto fail_queues;
 	}
 
-	/* Step 9: Cmd 0x09 — SetProperty "AverageBitRate" */
-	pr_debug("apple-ave: [setup] Step 9: SetProperty AverageBitRate = %u\n", bitrate);
-	status = ave_send_set_property_s32(session, "AverageBitRate", bitrate);
+	/* Step 8b: SetProperty "ExpectedFrameRate" (integer fps only) */
+	if (params->fps_den == 1 && params->fps_num > 0) {
+		status = ave_send_set_property_s32(session, "ExpectedFrameRate",
+						   params->fps_num);
+		if (status)
+			pr_warn("apple-ave: [setup] ExpectedFrameRate rejected (%d)\n", status);
+	}
+
+	/* Step 8c: SetProperty "ProfileLevel" (string) */
+	ave_build_profile_level_string(profile_buf, sizeof(profile_buf),
+				       params->profile, params->level);
+	status = ave_send_set_property_string(session, "ProfileLevel", profile_buf);
+	if (status)
+		pr_warn("apple-ave: [setup] ProfileLevel \"%s\" rejected (%d), using default\n",
+			profile_buf, status);
+
+	/* Step 9: SetProperty "AverageBitRate" */
+	status = ave_send_set_property_s32(session, "AverageBitRate", params->bitrate);
 	if (status) {
 		pr_err("apple-ave: [setup] AverageBitRate FAILED (%d)\n", status);
 		goto fail_queues;
 	}
 
-	/* Step 10: Cmd 0x08 — CopyProperty "MVHEVCVideoLayerIDs" */
-	pr_debug("apple-ave: [setup] Step 10: CopyProperty MVHEVCVideoLayerIDs\n");
+	/* Step 9b: SetProperty "ConstantBitRate" (CBR mode only) */
+	if (params->bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) {
+		status = ave_send_set_property_bool(session, "ConstantBitRate", true);
+		if (status)
+			pr_warn("apple-ave: [setup] ConstantBitRate rejected (%d)\n", status);
+	}
+
+	/* Step 9c: SetProperty "Quality" (CQ mode only, float32) */
+	if (params->bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CQ) {
+		s32 q = clamp(params->quality, 1, 100);
+
+		status = ave_send_set_property_float32(session, "Quality",
+						       ave_quality_to_float32[q]);
+		if (status)
+			pr_warn("apple-ave: [setup] Quality rejected (%d)\n", status);
+	}
+
+	/* Step 9d: SetProperty "MaxKeyFrameInterval" (GOP size) */
+	if (params->gop_size > 0) {
+		status = ave_send_set_property_s32(session, "MaxKeyFrameInterval",
+						   params->gop_size);
+		if (status)
+			pr_warn("apple-ave: [setup] MaxKeyFrameInterval rejected (%d)\n", status);
+	}
+
+	/* Step 9e: SetProperty "MinAllowedFrameQP" */
+	if (params->min_qp > 0) {
+		status = ave_send_set_property_s32(session, "MinAllowedFrameQP",
+						   params->min_qp);
+		if (status)
+			pr_warn("apple-ave: [setup] MinAllowedFrameQP rejected (%d)\n", status);
+	}
+
+	/* Step 9f: SetProperty "MaxAllowedFrameQP" */
+	if (params->max_qp > 0) {
+		status = ave_send_set_property_s32(session, "MaxAllowedFrameQP",
+						   params->max_qp);
+		if (status)
+			pr_warn("apple-ave: [setup] MaxAllowedFrameQP rejected (%d)\n", status);
+	}
+
+	/* Step 10: CopyProperty "MVHEVCVideoLayerIDs" */
 	status = ave_send_copy_property(session, "MVHEVCVideoLayerIDs");
 	if (status) {
 		pr_err("apple-ave: [setup] MVHEVCVideoLayerIDs FAILED (%d)\n", status);
 		goto fail_queues;
 	}
 
-	/* Step 11: Cmd 0x05 — PrepareToEncodeFrames */
-	pr_debug("apple-ave: [setup] Step 11: PrepareToEncodeFrames\n");
+	/* Step 11: PrepareToEncodeFrames */
 	ave_build_cmd_prepare(session->cmd_buf);
 	ave_stamp_session_token(session);
 	status = ave_cmd_send_sync(&session->queues, session->cmd_buf, AVE_CMD_BUF_SIZE);
@@ -163,43 +393,43 @@ int ave_session_setup(struct ave_session *session, struct apple_bce_device *bce,
 		pr_err("apple-ave: [setup] Prepare FAILED (%d)\n", status);
 		goto fail_queues;
 	}
-	pr_debug("apple-ave: [setup] Step 11: PrepareToEncodeFrames OK\n");
 
-	/* Step 11b: Cmd 0x09 — SetProperty "BPictures" = 0
-	 * T2's processPrepareToEncodeFrames internally sets BPictures=1
-	 * for resolutions >1080p (pixels > 0x1FE000). B-frames require
-	 * frame reordering which our pipeline doesn't support, causing
-	 * RPS (Reference Picture Set) errors during decode. Override to 0
-	 * after Prepare to disable B-frames unconditionally. */
-	if ((u64)width * height > 0x1FE000) {
-		pr_debug("apple-ave: [setup] Step 11b: SetProperty BPictures = 0 (override >1080p)\n");
-		status = ave_send_set_property_s32(session, "BPictures", 0);
-		if (status) {
-			pr_err("apple-ave: [setup] BPictures FAILED (%d)\n", status);
-			goto fail_queues;
-		}
+	/* Step 11b: SetProperty "BPictures" = 0
+	 * Our synchronous pipeline cannot handle B-frame reordering.
+	 * T2's processPrepareToEncodeFrames may internally set BPictures=1
+	 * for resolutions >1080p, so always override to 0 after Prepare. */
+	status = ave_send_set_property_s32(session, "BPictures", 0);
+	if (status) {
+		pr_err("apple-ave: [setup] BPictures FAILED (%d)\n", status);
+		goto fail_queues;
 	}
 
-	/* Step 12: Cmd 0x09 — SetProperty "ColorPrimaries" = 1 (BT.709) */
-	pr_debug("apple-ave: [setup] Step 12: SetProperty ColorPrimaries = 1\n");
-	status = ave_send_set_property_s32(session, "ColorPrimaries", 1);
+	/* Step 12: SetProperty "ColorPrimaries" */
+	status = ave_send_set_property_s32(session, "ColorPrimaries",
+					   params->color_primaries);
 	if (status) {
 		pr_err("apple-ave: [setup] ColorPrimaries FAILED (%d)\n", status);
 		goto fail_queues;
 	}
 
-	/* Step 13: Cmd 0x09 — SetProperty "YCbCrMatrix" = 1 (BT.709) */
-	pr_debug("apple-ave: [setup] Step 13: SetProperty YCbCrMatrix = 1\n");
-	status = ave_send_set_property_s32(session, "YCbCrMatrix", 1);
+	/* Step 13: SetProperty "YCbCrMatrix" */
+	status = ave_send_set_property_s32(session, "YCbCrMatrix",
+					   params->ycbcr_matrix);
 	if (status) {
 		pr_err("apple-ave: [setup] YCbCrMatrix FAILED (%d)\n", status);
 		goto fail_queues;
 	}
 
+	/* Step 13b: SetProperty "TransferFunction" */
+	status = ave_send_set_property_s32(session, "TransferFunction",
+					   params->transfer_func);
+	if (status)
+		pr_warn("apple-ave: [setup] TransferFunction rejected (%d)\n", status);
+
 	session->state = AVE_STATE_CONFIGURED;
 	session->frame_counter = 0;
 	pr_debug("apple-ave: === SESSION SETUP COMPLETE (%ux%u @ %u bps) ===\n",
-		 width, height, bitrate);
+		 width, height, params->bitrate);
 	return 0;
 
 fail_queues:
