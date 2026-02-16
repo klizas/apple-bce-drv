@@ -44,8 +44,6 @@ struct bce_vhci_transfer_queue {
 
     struct work_struct w_reset;
     struct work_struct w_resume;
-    struct work_struct w_pause;
-    atomic_t pending_pause_count;
 
     /* Count of ghost sq_in completions to absorb from cancelled IN URBs.
      * When an active IN URB is cancelled, its TRANSFER_REQUEST + DMA are

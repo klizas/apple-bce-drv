@@ -460,12 +460,10 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
      * confuse the next resume cycle. */
     WRITE_ONCE(vhci->port_reenumerate_mask, 0);
 
-    /* Pause endpoints on T2 BEFORE flushing the workqueue. The lightweight
-     * pause sets paused_by |= SUSPEND and drains pending_pause_count,
-     * which short-circuits any pending w_pause workers — they'll see the
-     * counter at zero and skip. Without this ordering, flush_workqueue
-     * blocks on N × do_pause() (3 T2 round-trips per endpoint), causing
-     * progressive suspend slowdown. */
+    /* Pause endpoints on T2 BEFORE flushing the workqueue.
+     * Without this ordering, flush_workqueue blocks on N × do_pause()
+     * (3 T2 round-trips per endpoint), causing progressive suspend
+     * slowdown. */
     for (i = 0; i < 16; i++) {
         struct bce_vhci_device *vdev;
         if (!vhci->port_to_device[i])
@@ -488,7 +486,6 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
                             i, j, status);
             }
             tq->paused_by |= BCE_VHCI_PAUSE_SUSPEND;
-            atomic_set(&tq->pending_pause_count, 0);
             mutex_unlock(&tq->pause_lock);
         }
     }
@@ -546,6 +543,15 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
     ++resume_cycle;
     pr_info("bce_vhci: resume started (cycle %u)\n", resume_cycle);
 
+    /* If recovery is already in progress (e.g. watchdog fired during
+     * suspend), defer to it.  Return 0 so USB core doesn't call
+     * usb_hc_died() — recovery will restart the controller and
+     * re-enumerate devices once it completes. */
+    if (atomic_read(&vhci->recovering)) {
+        pr_info("bce_vhci: resume: recovery in progress, deferring\n");
+        return 0;
+    }
+
     pr_debug("bce_vhci: resume: resuming event queues\n");
     bce_vhci_event_queue_resume(&vhci->ev_commands);
     bce_vhci_event_queue_resume(&vhci->ev_system);
@@ -555,10 +561,11 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
 
     pr_debug("bce_vhci: resume: starting controller\n");
     if ((status = bce_vhci_cmd_controller_start(&vhci->cq))) {
-        pr_err("bce_vhci: resume: controller_start failed (err=%d)\n", status);
+        pr_err("bce_vhci: resume: controller_start failed (err=%d), scheduling recovery\n", status);
         WRITE_ONCE(vhci->port_suppress_connect_mask, 0);
         WRITE_ONCE(vhci->port_reenumerate_mask, 0);
-        return status;
+        schedule_work(&vhci->w_recovery);
+        return 0;
     }
 
     /* Flush stale DMA transfer submissions from before S3.
@@ -771,7 +778,8 @@ static int bce_vhci_drop_endpoint(struct usb_hcd *hcd, struct usb_device *udev, 
 
     if (!q) {
         if (vdev->tq_mask & BIT(endp_index)) {
-            pr_err("something deleted the hcpriv?\n");
+            pr_debug("bce-vhci: [%02x] drop_endpoint: hcpriv cleared (cancel_all teardown)\n",
+                     endp_index);
             q = &vdev->tq[endp_index];
         } else {
             return 0;
@@ -802,7 +810,6 @@ static int bce_vhci_create_message_queues(struct bce_vhci *vhci)
     }
     spin_lock_init(&vhci->msg_asynchronous_lock);
     spin_lock_init(&vhci->msg_isochronous_lock);
-    spin_lock_init(&vhci->msg_interrupt_lock);
     bce_vhci_command_queue_create(&vhci->cq, &vhci->msg_commands);
     return 0;
 }

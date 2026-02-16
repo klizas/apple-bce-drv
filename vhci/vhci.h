@@ -25,7 +25,6 @@ struct bce_vhci {
     struct bce_vhci_message_queue msg_asynchronous;
     struct spinlock msg_asynchronous_lock;
     struct spinlock msg_isochronous_lock;
-    struct spinlock msg_interrupt_lock;
     struct bce_vhci_command_queue cq;
     struct bce_queue_cq *ev_cq;
     struct bce_vhci_event_queue ev_commands;

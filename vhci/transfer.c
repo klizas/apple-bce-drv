@@ -15,7 +15,6 @@ static int bce_vhci_urb_transfer_completion(struct bce_vhci_urb *urb, struct bce
 
 static void bce_vhci_transfer_queue_reset_w(struct work_struct *work);
 static void bce_vhci_transfer_queue_deferred_resume_w(struct work_struct *work);
-static void bce_vhci_transfer_queue_deferred_pause_w(struct work_struct *work);
 
 void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transfer_queue *q,
         struct usb_host_endpoint *endp, bce_vhci_device_t dev_addr, enum dma_data_direction dir)
@@ -45,8 +44,6 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
     q->cq = bce_create_cq(vhci->dev, 0x100);
     INIT_WORK(&q->w_reset, bce_vhci_transfer_queue_reset_w);
     INIT_WORK(&q->w_resume, bce_vhci_transfer_queue_deferred_resume_w);
-    INIT_WORK(&q->w_pause, bce_vhci_transfer_queue_deferred_pause_w);
-    atomic_set(&q->pending_pause_count, 0);
     q->ghost_in_count = 0;
     q->sq_in = NULL;
     if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) {
@@ -64,7 +61,6 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
 
 void bce_vhci_destroy_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transfer_queue *q)
 {
-    cancel_work_sync(&q->w_pause);
     cancel_work_sync(&q->w_resume);
     cancel_work_sync(&q->w_reset);
     bce_vhci_transfer_queue_giveback(q);
@@ -418,19 +414,6 @@ static void bce_vhci_transfer_queue_deferred_resume_w(struct work_struct *work)
     bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
 }
 
-static void bce_vhci_transfer_queue_deferred_pause_w(struct work_struct *work)
-{
-    struct bce_vhci_transfer_queue *q =
-        container_of(work, struct bce_vhci_transfer_queue, w_pause);
-
-    if (atomic_dec_if_positive(&q->pending_pause_count) >= 0) {
-        bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
-        while (atomic_dec_if_positive(&q->pending_pause_count) >= 0)
-            ;
-        if (!list_empty(&q->endp->urb_list))
-            bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
-    }
-}
 
 static void bce_vhci_transfer_queue_init_pending_urbs(struct bce_vhci_transfer_queue *q)
 {
