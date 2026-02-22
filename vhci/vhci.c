@@ -719,6 +719,10 @@ static void bce_vhci_handle_system_event(struct bce_vhci_event_queue *q, struct 
 {
     if (msg->cmd & 0x8000) {
         bce_vhci_command_queue_deliver_completion(&q->vhci->cq, msg);
+    } else if (msg->cmd == BCE_VHCI_CMD_PORT_STATUS_CHANGE) {
+        pr_debug("bce-vhci: T2 port status change: port=%u status=0x%llx\n",
+                 msg->param1, msg->param2);
+        usb_hcd_poll_rh_status(q->vhci->hcd);
     } else {
         pr_warn("bce-vhci: Unhandled system event: %x s=%x p1=%x p2=%llx\n",
                 msg->cmd, msg->status, msg->param1, msg->param2);
