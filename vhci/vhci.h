@@ -47,7 +47,7 @@ struct bce_vhci {
     bool controller_dead;                  /* Set after repeated recovery failures — all commands return -ENODEV */
     unsigned long port_resume_mask;        /* Ports with connection change (accessed atomically) */
     unsigned long port_reenumerate_mask;   /* Ports where GetPortStatus hides CONNECTION to force disconnect+re-enum */
-    unsigned long port_suppress_connect_mask; /* Ports where PORT_CONNECT events are suppressed during session refresh */
+    unsigned long port_suppress_connect_mask; /* Ports where PORT_STATUS_CHANGE events are suppressed during session refresh */
     u8 port_resume_skip_reset[16];         /* Skip count for reset_device after bus_resume refresh */
 };
 

@@ -302,10 +302,10 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
         dev_err(a->dev, "Failed to get input stream list for device %llx\n", dev_id);
         goto fail;
     }
-    if (stream_cnt > AAUDIO_DEIVCE_MAX_INPUT_STREAMS) {
+    if (stream_cnt > AAUDIO_DEVICE_MAX_INPUT_STREAMS) {
         dev_warn(a->dev, "Device %s input stream count %llu is larger than the supported count of %u\n",
-                sdev->uid, stream_cnt, AAUDIO_DEIVCE_MAX_INPUT_STREAMS);
-        stream_cnt = AAUDIO_DEIVCE_MAX_INPUT_STREAMS;
+                sdev->uid, stream_cnt, AAUDIO_DEVICE_MAX_INPUT_STREAMS);
+        stream_cnt = AAUDIO_DEVICE_MAX_INPUT_STREAMS;
     }
     sdev->in_stream_cnt = stream_cnt;
     for (i = 0; i < stream_cnt; i++) {
@@ -319,10 +319,10 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
         dev_err(a->dev, "Failed to get output stream list for device %llx\n", dev_id);
         goto fail;
     }
-    if (stream_cnt > AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS) {
-        dev_warn(a->dev, "Device %s input stream count %llu is larger than the supported count of %u\n",
-                 sdev->uid, stream_cnt, AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS);
-        stream_cnt = AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS;
+    if (stream_cnt > AAUDIO_DEVICE_MAX_OUTPUT_STREAMS) {
+        dev_warn(a->dev, "Device %s output stream count %llu is larger than the supported count of %u\n",
+                 sdev->uid, stream_cnt, AAUDIO_DEVICE_MAX_OUTPUT_STREAMS);
+        stream_cnt = AAUDIO_DEVICE_MAX_OUTPUT_STREAMS;
     }
     sdev->out_stream_cnt = stream_cnt;
     for (i = 0; i < stream_cnt; i++) {
@@ -494,10 +494,10 @@ static void aaudio_init_bs_stream(struct aaudio_device *a, struct aaudio_stream 
 {
     size_t i;
     strm->buffer_cnt = bs_strm->num_buffers;
-    if (bs_strm->num_buffers > AAUDIO_DEIVCE_MAX_BUFFER_COUNT) {
+    if (bs_strm->num_buffers > AAUDIO_DEVICE_MAX_BUFFER_COUNT) {
         dev_warn(a->dev, "BufferStruct buffer count %u exceeds driver limit of %u\n", bs_strm->num_buffers,
-                AAUDIO_DEIVCE_MAX_BUFFER_COUNT);
-        strm->buffer_cnt = AAUDIO_DEIVCE_MAX_BUFFER_COUNT;
+                AAUDIO_DEVICE_MAX_BUFFER_COUNT);
+        strm->buffer_cnt = AAUDIO_DEVICE_MAX_BUFFER_COUNT;
     }
     if (!strm->buffer_cnt)
         return;

@@ -508,9 +508,9 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
         return status;
     }
 
-    /* Set PORT_CONNECT suppress mask BEFORE pausing event queues, so it's
+    /* Set PORT_STATUS_CHANGE suppress mask BEFORE pausing event queues, so it's
      * in RAM through S3. When PCIe restores before bus_resume runs, T2 may
-     * deliver PORT_CONNECT events via interrupt — the mask must already be
+     * deliver PORT_STATUS_CHANGE events via interrupt — the mask must already be
      * set or those events will trigger USB core re-enumeration. */
     {
         unsigned long suppress = 0;
@@ -996,7 +996,7 @@ static void bce_vhci_handle_system_event(struct bce_vhci_event_queue *q, struct 
     }
 
     switch (msg->cmd) {
-    case BCE_VHCI_CMD_PORT_CONNECT:
+    case BCE_VHCI_CMD_PORT_STATUS_CHANGE:
         /*
          * T2 notifies us that a port connection state changed.
          * This happens during boot and resume. Mark the port as changed
@@ -1007,11 +1007,15 @@ static void bce_vhci_handle_system_event(struct bce_vhci_event_queue *q, struct 
          * connection change and trigger re-enumeration.
          */
         port = (u8)(msg->param1 & 0xff);
-        if (test_bit(port, &q->vhci->port_suppress_connect_mask)) {
-            pr_debug("bce-vhci: port %d connect notification suppressed (session refresh)\n", port);
+        if (port == 0 || port > q->vhci->port_count) {
+            pr_warn("bce-vhci: port status change with invalid port %u\n", port);
             break;
         }
-        pr_info("bce-vhci: port %d connect notification (status=0x%llx)\n", port, msg->param2);
+        if (test_bit(port, &q->vhci->port_suppress_connect_mask)) {
+            pr_debug("bce-vhci: port %d status change suppressed (session refresh)\n", port);
+            break;
+        }
+        pr_info("bce-vhci: port %d status change (status=0x%llx)\n", port, msg->param2);
         set_bit(port, &q->vhci->port_resume_mask);
         if (hcd)
             usb_hcd_poll_rh_status(hcd);
