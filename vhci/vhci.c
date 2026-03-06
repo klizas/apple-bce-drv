@@ -66,10 +66,12 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
     vhci->hcd->speed = HCD_USB2;
 
     if ((status = usb_add_hcd(vhci->hcd, 0, 0)))
-        goto fail_hcd;
+        goto fail_add_hcd;
 
     return 0;
 
+fail_add_hcd:
+    usb_put_hcd(vhci->hcd);
 fail_hcd:
     bce_vhci_destroy_event_queues(vhci);
 fail_eq:
@@ -436,7 +438,7 @@ static int bce_vhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev
 
 static int bce_vhci_get_frame_number(struct usb_hcd *hcd)
 {
-    return 0;
+    return (int)(jiffies & 0x7FF);
 }
 
 static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
@@ -1265,12 +1267,10 @@ int __init bce_vhci_module_init(void)
 #endif
     if (IS_ERR(bce_vhci_class)) {
         result = PTR_ERR(bce_vhci_class);
-        goto fail_class;
+        goto fail_chrdev;
     }
     return 0;
 
-fail_class:
-    class_destroy(bce_vhci_class);
 fail_chrdev:
     unregister_chrdev_region(bce_vhci_chrdev, 1);
     if (!result)
