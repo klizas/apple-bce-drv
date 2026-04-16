@@ -701,8 +701,6 @@ static const struct vb2_ops ave_vb2_ops = {
 	.buf_queue		= ave_buf_queue,
 	.start_streaming	= ave_start_streaming,
 	.stop_streaming		= ave_stop_streaming,
-	.wait_prepare		= vb2_ops_wait_prepare,
-	.wait_finish		= vb2_ops_wait_finish,
 };
 
 /* === M2M ops === */
