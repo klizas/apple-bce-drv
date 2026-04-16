@@ -8,7 +8,6 @@ static dev_t bce_chrdev;
 static struct class *bce_class;
 
 struct apple_bce_device *global_bce;
-EXPORT_SYMBOL_GPL(global_bce);
 
 static int bce_create_command_queues(struct apple_bce_device *bce);
 static void bce_free_command_queues(struct apple_bce_device *bce);
@@ -106,6 +105,9 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
         pr_err("apple-bce: VHCI creation failed\n");
         goto fail_vhci;
     }
+
+    if ((status = bce_ave_create(bce)))
+        pr_warn("apple-bce: AVE encoder init failed (%d), continuing without video\n", status);
 
     /* The T2 chip requires function 0 (NVMe) to be a bus master for DMA
      * on our function. Create a device link for runtime PM ordering.
@@ -258,6 +260,7 @@ static void apple_bce_remove(struct pci_dev *dev)
     struct apple_bce_device *bce = pci_get_drvdata(dev);
     bce->is_being_removed = true;
 
+    bce_ave_destroy();
     bce_vhci_destroy(&bce->vhci);
 
     if (bce->pci0_link)

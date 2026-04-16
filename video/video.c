@@ -1020,17 +1020,12 @@ static int ave_queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue
 	return vb2_queue_init(dst_vq);
 }
 
-/* === Module init/exit === */
+/* === Init/exit called from apple_bce.c === */
 
-static int __init ave_module_init(void)
+int bce_ave_create(struct apple_bce_device *bce)
 {
 	struct ave_device *adev;
 	int status;
-
-	if (!global_bce) {
-		pr_info("apple-ave: no BCE device, skipping video encoder\n");
-		return 0;
-	}
 
 	/* Best-effort: start aveservice on T2 */
 	ave_xpc_start();
@@ -1039,7 +1034,7 @@ static int __init ave_module_init(void)
 	if (!adev)
 		return -ENOMEM;
 
-	adev->bce = global_bce;
+	adev->bce = bce;
 	mutex_init(&adev->dev_mutex);
 	mutex_init(&adev->session_mutex);
 
@@ -1090,7 +1085,7 @@ err_free:
 	return status;
 }
 
-static void __exit ave_module_exit(void)
+void bce_ave_destroy(void)
 {
 	struct ave_device *adev = ave_global_dev;
 
@@ -1115,12 +1110,3 @@ static void __exit ave_module_exit(void)
 	ave_global_dev = NULL;
 	pr_info("apple-ave: encoder unregistered\n");
 }
-
-module_init(ave_module_init);
-module_exit(ave_module_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("MrARM");
-MODULE_DESCRIPTION("Apple T2 HEVC Video Encoder (AVE)");
-MODULE_VERSION("0.01");
-MODULE_SOFTDEP("pre: apple-bce");
