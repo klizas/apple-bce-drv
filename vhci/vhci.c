@@ -270,14 +270,19 @@ static int bce_vhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
     struct bce_vhci_device *vdev;
     bce_vhci_device_t devid;
+    int status;
     pr_debug("bce_vhci_enable_device\n");
 
     if (vhci->port_to_device[udev->portnum])
         return 0;
 
     /* We need to early address the device */
-    if (bce_vhci_cmd_device_create(&vhci->cq, udev->portnum, &devid))
+    status = bce_vhci_cmd_device_create(&vhci->cq, udev->portnum, &devid);
+    if (status) {
+        pr_err("bce_vhci: enable_device: port %d device_create failed (err=%d)\n",
+                udev->portnum, status);
         return -EIO;
+    }
 
     pr_debug("bce_vhci_cmd_device_create %i -> %i\n", udev->portnum, devid);
 
@@ -639,7 +644,10 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
 
         /* Destroy and recreate T2 device — port_reset required by T2
          * before device_create will succeed.
-         * Skip destroy for reconnected devices: T2 already destroyed them. */
+         * Skip destroy for reconnected devices: T2 already destroyed them.
+         * Forcing a destroy here when T2 already freed the id causes T2 to
+         * reuse the same devid on create, which leads to ~5s control-transfer
+         * stalls on busy multi-endpoint devices (e.g. keyboard/trackpad). */
         if (!connection_changed) {
             status = bce_vhci_cmd_device_destroy(&vhci->cq, devid);
             if (status) {
@@ -654,8 +662,12 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
             kfree(vdev);
             goto reenumerate;
         }
-        if (bce_vhci_cmd_device_create(&vhci->cq, i, &new_devid)) {
-            pr_err("bce_vhci: resume: port %d device_create failed, falling back to re-enum\n", i);
+        status = bce_vhci_cmd_device_create(&vhci->cq, i, &new_devid);
+        if (status) {
+            pr_err("bce_vhci: resume: port %d device_create failed (err=%d), falling back to re-enum\n", i, status);
+            /* Best-effort cleanup: try once more to destroy the stale T2-side
+             * devid so USB core's re-enumeration retry isn't blocked. */
+            bce_vhci_cmd_device_destroy(&vhci->cq, devid);
             kfree(vdev);
             goto reenumerate;
         }
