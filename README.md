@@ -14,8 +14,10 @@ If you want to support me, you can do so by donating to me on PayPal: https://pa
 
 This fork adds a fourth component on top of upstream:
 
-- Video (AVE) - a V4L2 mem2mem encoder exposing the T2's hardware HEVC encoder. NV12/NV12M input, HEVC bitstream output. Registers as `apple-ave` (card "Apple T2 HEVC Encoder") with `V4L2_CAP_VIDEO_M2M_MPLANE`. Lives in `video/`, built into the same `apple_bce` module as the rest of the driver.
+- **Video (AVE)** — a V4L2 mem2mem encoder exposing the T2's hardware HEVC encoder. NV12/NV12M input, HEVC bitstream output. Registers as `apple-ave` (card "Apple T2 HEVC Encoder") with `V4L2_CAP_VIDEO_M2M_MPLANE`. Lives in `video/`, built into the same `apple_bce` module as the rest of the driver.
+
+### Runtime requirement: t2aved
 
 The encoder speaks an XPC protocol the kernel does not implement. The driver forwards encode sessions to a userspace daemon over a Unix socket — default `/run/aveserverd.sock`, overridable via the `sock_path` parameter on the `apple_bce` module.
 
-The daemon is [t2aved](https://github.com/klizas/t2aved). It must be built and running before anything opens the encoder's `/dev/videoN` node, otherwise session setup fails. Without t2aved the V4L2 device is present but non-functional.
+**[t2aved](https://github.com/klizas/t2aved) must be installed and running before anything opens the encoder's `/dev/videoN` node.** Without it the V4L2 device is present but non-functional (session setup fails). See the [t2aved README](https://github.com/klizas/t2aved#readme) for install and diagnostics.
