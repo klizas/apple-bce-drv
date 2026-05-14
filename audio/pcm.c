@@ -313,23 +313,33 @@ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, 
 {
     unsigned long flags;
     struct aaudio_stream *stream;
+    struct snd_pcm_runtime *runtime;
+    snd_pcm_uframes_t period_size;
 
     stream = aaudio_pcm_stream(substream);
     snd_pcm_stream_lock_irqsave(substream, flags);
+    runtime = substream->runtime;
+    if (!runtime) {
+        /* PCM was closed (e.g. PipeWire tore down the substream) while a
+         * timestamp message was still in flight from the T2 firmware. */
+        snd_pcm_stream_unlock_irqrestore(substream, flags);
+        return;
+    }
     stream->remote_timestamp = timestamp;
     if (stream->waiting_for_first_ts) {
         stream->waiting_for_first_ts = false;
         snd_pcm_stream_unlock_irqrestore(substream, flags);
         return;
     }
+    period_size = runtime->period_size;
     snd_pcm_stream_unlock_irqrestore(substream, flags);
 
     /* Only fire period_elapsed once per period's worth of hardware packets.
      * Count timestamps rather than using wall-clock time so that bursty
      * message delivery (e.g. after a scheduling delay) doesn't swallow
      * period notifications. */
-    if (substream->runtime->period_size) {
-        unsigned int packets_per_period = substream->runtime->period_size /
+    if (period_size) {
+        unsigned int packets_per_period = period_size /
                                           stream->desc.frames_per_packet;
         stream->elapsed_count++;
         if (packets_per_period > 1 && stream->elapsed_count < packets_per_period)
