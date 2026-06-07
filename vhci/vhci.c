@@ -756,6 +756,7 @@ static int bce_vhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev, s
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
     bce_vhci_device_t devid = vhci->port_to_device[udev->portnum];
     struct bce_vhci_device *vdev = vhci->devices[devid];
+    int status;
     pr_debug("bce_vhci_add_endpoint %x/%x:%x\n", udev->portnum, devid, endp_index);
     if (udev->bus->root_hub == udev) /* The USB hub */
         return 0;
@@ -771,7 +772,15 @@ static int bce_vhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev, s
     endp->hcpriv = &vdev->tq[endp_index];
     vdev->tq_mask |= BIT(endp_index);
 
-    bce_vhci_cmd_endpoint_create(&vhci->cq, devid, &endp->desc);
+    status = bce_vhci_cmd_endpoint_create(&vhci->cq, devid, &endp->desc);
+    if (status) {
+        pr_err("bce_vhci_add_endpoint: port %d devid=%d ep=%02x endpoint_create failed (err=%d)\n",
+                udev->portnum, devid, endp->desc.bEndpointAddress, status);
+        vdev->tq_mask &= ~BIT(endp_index);
+        endp->hcpriv = NULL;
+        bce_vhci_destroy_transfer_queue(vhci, &vdev->tq[endp_index]);
+        return status;
+    }
     return 0;
 }
 
