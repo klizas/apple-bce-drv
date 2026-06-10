@@ -50,6 +50,7 @@ int bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transf
     INIT_WORK(&q->w_flush, bce_vhci_transfer_queue_flush_w);
     INIT_LIST_HEAD(&q->flush_giveback_list);
     q->ghost_in_count = 0;
+    q->ghost_out_count = 0;
     q->sq_in = NULL;
     if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) {
         snprintf(name, sizeof(name), "VHC1-%i-%02x", dev_addr, 0x80 | usb_endpoint_num(&endp->desc));
@@ -241,13 +242,22 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
             bce_notify_submission_complete(sq);
             continue;
         }
-        /* Absorb ghost sq_in completions from cancelled IN URBs.
+        /* Absorb ghost completions from cancelled URBs.
          * T2 completed the DMA but the URB is already gone — just
          * free the active slot and kick any INIT_PENDING URBs. */
         if (!is_sq_out && q->ghost_in_count > 0) {
             q->ghost_in_count--;
             ++q->remaining_active_requests;
             bce_vhci_transfer_queue_init_pending_urbs(q);
+            bce_notify_submission_complete(sq);
+            continue;
+        }
+        if (is_sq_out && q->ghost_out_count > 0) {
+            q->ghost_out_count--;
+            ++q->remaining_active_requests;
+            bce_vhci_transfer_queue_init_pending_urbs(q);
+            if (atomic_dec_if_positive(&q->sq_out_pending) == 0)
+                wake_up(&q->sq_out_wait_queue);
             bce_notify_submission_complete(sq);
             continue;
         }
@@ -569,15 +579,17 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
 
     /* Free the active request slot so new URBs can use it. */
     if (old_state != BCE_VHCI_URB_INIT_PENDING) {
-        if (old_state == BCE_VHCI_URB_WAITING_FOR_COMPLETION &&
-            vurb->dir == DMA_FROM_DEVICE && !vurb->is_control) {
-            /* Active IN data transfer: T2 has a pending
-             * TRANSFER_REQUEST + sq_in DMA in its pipeline.
+        if (old_state == BCE_VHCI_URB_WAITING_FOR_COMPLETION && !vurb->is_control) {
+            /* Active data transfer: T2 has a pending
+             * TRANSFER_REQUEST + DMA in its pipeline.
              * Don't free the slot yet — let the ghost completion
              * handler absorb it.  This avoids pausing the endpoint
              * (which disrupts the UVC bulk stream) or exceeding
              * T2's max_active limit. */
-            q->ghost_in_count++;
+            if (vurb->dir == DMA_FROM_DEVICE)
+                q->ghost_in_count++;
+            else
+                q->ghost_out_count++;
         } else {
             ++q->remaining_active_requests;
         }
@@ -593,7 +605,7 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
      * usb_kill_urb callers block until the flush completes.  This only
      * fires during teardown (STREAMOFF) — during normal streaming, new
      * URBs keep the list non-empty. */
-    if (q->ghost_in_count > 0 && list_empty(&q->endp->urb_list)) {
+    if ((q->ghost_in_count > 0 || q->ghost_out_count > 0) && list_empty(&q->endp->urb_list)) {
         urb->status = status;
         list_add_tail(&urb->urb_list, &q->flush_giveback_list);
         spin_unlock_irqrestore(&q->urb_lock, flags);
@@ -617,6 +629,7 @@ static void bce_vhci_transfer_queue_flush_w(struct work_struct *work)
     bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
     spin_lock_irqsave(&q->urb_lock, flags);
     q->ghost_in_count = 0;
+    q->ghost_out_count = 0;
     q->remaining_active_requests = q->max_active_requests;
     list_splice_tail_init(&q->flush_giveback_list, &q->giveback_urb_list);
     spin_unlock_irqrestore(&q->urb_lock, flags);
