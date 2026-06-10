@@ -117,8 +117,7 @@ struct bce_queue_sq *bce_alloc_sq(struct apple_bce_device *dev, int qid, u32 el_
     q->completion_data = kzalloc(sizeof(struct bce_sq_completion_data) * el_count, GFP_KERNEL);
     q->reg_mem_dma = dev->reg_mem_dma;
     atomic_set(&q->available_commands, el_count - 1);
-    init_completion(&q->available_command_completion);
-    atomic_set(&q->available_command_completion_waiting_count, 0);
+    init_waitqueue_head(&q->available_command_wq);
     if (!q->data || !q->completion_data) {
         pr_err("DMA queue memory alloc failed\n");
         if (q->data)
@@ -152,12 +151,8 @@ int bce_reserve_submission(struct bce_queue_sq *sq, unsigned long *timeout)
     while (atomic_dec_if_positive(&sq->available_commands) < 0) {
         if (!timeout || !*timeout)
             return -EAGAIN;
-        atomic_inc(&sq->available_command_completion_waiting_count);
-        *timeout = wait_for_completion_timeout(&sq->available_command_completion, *timeout);
-        if (!*timeout) {
-            if (atomic_dec_if_positive(&sq->available_command_completion_waiting_count) < 0)
-                try_wait_for_completion(&sq->available_command_completion); /* consume the pending completion */
-        }
+        *timeout = wait_event_timeout(sq->available_command_wq,
+                atomic_read(&sq->available_commands) > 0, *timeout);
     }
     return 0;
 }
@@ -188,9 +183,7 @@ void bce_notify_submission_complete(struct bce_queue_sq *sq)
 {
     sq->head = (sq->head + 1) % sq->el_count;
     atomic_inc(&sq->available_commands);
-    if (atomic_dec_if_positive(&sq->available_command_completion_waiting_count) >= 0) {
-        complete(&sq->available_command_completion);
-    }
+    wake_up(&sq->available_command_wq);
 }
 EXPORT_SYMBOL_GPL(bce_notify_submission_complete);
 

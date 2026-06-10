@@ -3,6 +3,7 @@
 
 #include <linux/completion.h>
 #include <linux/pci.h>
+#include <linux/wait.h>
 
 #define BCE_CMD_SIZE 0x40
 
@@ -42,8 +43,7 @@ struct bce_queue_sq {
     void __iomem *reg_mem_dma;
 
     atomic_t available_commands;
-    struct completion available_command_completion;
-    atomic_t available_command_completion_waiting_count;
+    wait_queue_head_t available_command_wq;
     u32 head, tail;
 
     u32 completion_cidx, completion_tail;
