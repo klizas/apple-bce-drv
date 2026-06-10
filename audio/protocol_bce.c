@@ -59,6 +59,7 @@ int aaudio_bce_queue_init(struct aaudio_device *dev, struct aaudio_bce_queue *q,
     q->data = dma_alloc_coherent(&dev->bce->pci->dev, q->el_size * q->el_count, &q->dma_addr, GFP_KERNEL);
     if (!q->data) {
         bce_destroy_sq(dev->bce, q->sq);
+        q->sq = NULL;
         return -EINVAL;
     }
     return 0;

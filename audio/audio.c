@@ -85,7 +85,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     if (aaudio_bce_init(aaudio)) {
         dev_warn(&dev->dev, "aaudio: Failed to init BCE command transport\n");
-        goto fail;
+        goto fail_bce;
     }
 
     if (snd_card_new(aaudio->dev, aaudio_alsa_index, aaudio_alsa_id, THIS_MODULE, 0, &aaudio->card)) {
