@@ -311,7 +311,13 @@ static int bce_vhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
     vhci->port_to_device[udev->portnum] = devid;
     vhci->devices[devid] = vdev;
 
-    bce_vhci_create_transfer_queue(vhci, &vdev->tq[0], &udev->ep0, devid, DMA_BIDIRECTIONAL);
+    if (bce_vhci_create_transfer_queue(vhci, &vdev->tq[0], &udev->ep0, devid, DMA_BIDIRECTIONAL)) {
+        vhci->devices[devid] = NULL;
+        vhci->port_to_device[udev->portnum] = 0;
+        kfree(vdev);
+        bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+        return -ENOMEM;
+    }
     udev->ep0.hcpriv = &vdev->tq[0];
     vdev->tq_mask |= BIT(0);
 
@@ -442,7 +448,13 @@ static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout)
                 dir = usb_endpoint_dir_in(&dev->tq[i].endp->desc) ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
                 if (i == 0)
                     dir = DMA_BIDIRECTIONAL;
-                bce_vhci_create_transfer_queue(vhci, &dev->tq[i], dev->tq[i].endp, devid, dir);
+                if (bce_vhci_create_transfer_queue(vhci, &dev->tq[i], dev->tq[i].endp, devid, dir)) {
+                    pr_err("bce_vhci_reset_device: port %d failed to recreate tq %d\n", index, i);
+                    if (dev->tq[i].endp)
+                        dev->tq[i].endp->hcpriv = NULL;
+                    dev->tq_mask &= ~BIT(i);
+                    continue;
+                }
                 /* Restore hcpriv after recreating the queue */
                 dev->tq[i].endp->hcpriv = &dev->tq[i];
                 bce_vhci_cmd_endpoint_create(&vhci->cq, devid, &dev->tq[i].endp->desc);
@@ -696,7 +708,14 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
         /* Create ONLY EP0 — matches boot-time device state.
          * Non-EP0 endpoints will be recreated by add_endpoint
          * when USB core restores configuration during reset_resume. */
-        bce_vhci_create_transfer_queue(vhci, &vdev->tq[0], ep0_endp, new_devid, DMA_BIDIRECTIONAL);
+        if (bce_vhci_create_transfer_queue(vhci, &vdev->tq[0], ep0_endp, new_devid, DMA_BIDIRECTIONAL)) {
+            pr_err("bce_vhci: resume: port %d EP0 queue creation failed, falling back to re-enum\n", i);
+            vhci->devices[new_devid] = NULL;
+            vhci->port_to_device[i] = 0;
+            bce_vhci_cmd_device_destroy(&vhci->cq, new_devid);
+            kfree(vdev);
+            goto reenumerate;
+        }
         ep0_endp->hcpriv = &vdev->tq[0];
         vdev->tq_mask = BIT(0);
         bce_vhci_cmd_endpoint_create(&vhci->cq, new_devid, &ep0_endp->desc);
@@ -784,8 +803,9 @@ static int bce_vhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev, s
         return 0;
     }
 
-    bce_vhci_create_transfer_queue(vhci, &vdev->tq[endp_index], endp, devid,
-            usb_endpoint_dir_in(&endp->desc) ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
+    if (bce_vhci_create_transfer_queue(vhci, &vdev->tq[endp_index], endp, devid,
+            usb_endpoint_dir_in(&endp->desc) ? DMA_FROM_DEVICE : DMA_TO_DEVICE))
+        return -ENOMEM;
     endp->hcpriv = &vdev->tq[endp_index];
     vdev->tq_mask |= BIT(endp_index);
 
