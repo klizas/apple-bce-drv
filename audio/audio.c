@@ -120,12 +120,16 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     }
 
     list_for_each_entry(sdev, &aaudio->subdevice_list, list) {
-        struct aaudio_buffer_struct_device *dev = &aaudio->bs->devices[sdev->buf_id];
+        struct aaudio_buffer_struct_device *dev;
 
+        if (sdev->buf_id >= ARRAY_SIZE(aaudio->bs->devices))
+            continue;
+        dev = &aaudio->bs->devices[sdev->buf_id];
         if (sdev->out_stream_cnt == 1 && !strcmp(dev->name, "Speaker")) {
             struct snd_pcm_hardware *hw = sdev->out_streams[0].alsa_hw_desc;
 
-            snprintf(aaudio->card->driver, sizeof(aaudio->card->driver) / sizeof(char), "AppleT2x%d", hw->channels_min);
+            if (hw)
+                snprintf(aaudio->card->driver, sizeof(aaudio->card->driver) / sizeof(char), "AppleT2x%d", hw->channels_min);
         }
     }
 
@@ -444,7 +448,7 @@ static int aaudio_init_bs(struct aaudio_device *a)
     }
     dev_info(a->dev, "aaudio: BufferStruct ver = %i\n", a->bs->version);
     dev_info(a->dev, "aaudio: Num devices = %i\n", a->bs->num_devices);
-    for (i = 0; i < a->bs->num_devices; i++) {
+    for (i = 0; i < a->bs->num_devices && i < ARRAY_SIZE(a->bs->devices); i++) {
         dev = &a->bs->devices[i];
         dev_info(a->dev, "aaudio: Device %i %s\n", i, dev->name);
 
