@@ -411,9 +411,9 @@ struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queu
 #endif
         return NULL;
     }
-    spin_lock(&dev->queues_lock);
+    mutex_lock(&dev->queues_lock);
     dev->queues[qid] = (struct bce_queue *) sq;
-    spin_unlock(&dev->queues_lock);
+    mutex_unlock(&dev->queues_lock);
     return sq;
 }
 
@@ -448,9 +448,9 @@ struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, stru
 #endif
         return NULL;
     }
-    spin_lock(&dev->queues_lock);
+    mutex_lock(&dev->queues_lock);
     dev->queues[qid] = (struct bce_queue *) sq;
-    spin_unlock(&dev->queues_lock);
+    mutex_unlock(&dev->queues_lock);
     return sq;
 }
 
@@ -460,9 +460,9 @@ void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
 {
     if (!dev->is_being_removed && bce_cmd_unregister_memory_queue(dev->cmd_cmdq, (u16) cq->qid))
         pr_err("apple-bce: CQ unregister failed");
-    spin_lock(&dev->queues_lock);
+    mutex_lock(&dev->queues_lock);
     dev->queues[cq->qid] = NULL;
-    spin_unlock(&dev->queues_lock);
+    mutex_unlock(&dev->queues_lock);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
     ida_simple_remove(&dev->queue_ida, (uint) cq->qid);
 #else
@@ -477,9 +477,9 @@ void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq)
 {
     if (!dev->is_being_removed && bce_cmd_unregister_memory_queue(dev->cmd_cmdq, (u16) sq->qid))
         pr_err("apple-bce: CQ unregister failed");
-    spin_lock(&dev->queues_lock);
+    mutex_lock(&dev->queues_lock);
     dev->queues[sq->qid] = NULL;
-    spin_unlock(&dev->queues_lock);
+    mutex_unlock(&dev->queues_lock);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
     ida_simple_remove(&dev->queue_ida, (uint) sq->qid);
 #else
