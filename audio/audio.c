@@ -692,13 +692,13 @@ void aaudio_handle_command(struct aaudio_device *a, struct aaudio_msg *msg)
     }
 }
 
-static struct pci_device_id aaudio_ids[  ] = {
+static const struct pci_device_id aaudio_ids[  ] = {
         { PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x1803) },
         { 0, },
 };
 
 static SIMPLE_DEV_PM_OPS(aaudio_pci_driver_pm, aaudio_suspend, aaudio_resume);
-struct pci_driver aaudio_pci_driver = {
+static struct pci_driver aaudio_pci_driver = {
         .name = "aaudio",
         .id_table = aaudio_ids,
         .probe = aaudio_probe,

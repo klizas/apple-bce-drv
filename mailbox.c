@@ -8,15 +8,13 @@
 #define REG_MBOX_REPLY_BASE 0x810
 #define REG_TIMESTAMP_BASE 0xC000
 
-#define BCE_MBOX_TIMEOUT_MS 200
-
 void bce_mailbox_init(struct bce_mailbox *mb, void __iomem *reg_mb)
 {
     mb->reg_mb = reg_mb;
     init_completion(&mb->mb_completion);
 }
 
-int bce_mailbox_send(struct bce_mailbox *mb, u64 msg, u64* recv)
+int bce_mailbox_send(struct bce_mailbox *mb, u64 msg, u64* recv, int timeout_ms)
 {
     u32 __iomem *regb;
 
@@ -32,7 +30,7 @@ int bce_mailbox_send(struct bce_mailbox *mb, u64 msg, u64* recv)
     iowrite32(0, regb + 2);
     iowrite32(0, regb + 3);
 
-    wait_for_completion_timeout(&mb->mb_completion, msecs_to_jiffies(BCE_MBOX_TIMEOUT_MS));
+    wait_for_completion_timeout(&mb->mb_completion, msecs_to_jiffies(timeout_ms));
     if (atomic_read(&mb->mb_status) != 2) { // Didn't get the reply
         atomic_set(&mb->mb_status, 0);
         return -ETIMEDOUT;

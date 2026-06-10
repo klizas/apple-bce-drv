@@ -231,7 +231,7 @@ static int bce_fw_version_handshake(struct apple_bce_device *bce)
     int status;
 
     if ((status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_SET_FW_PROTOCOL_VERSION, BC_PROTOCOL_VERSION),
-            &result)))
+            &result, BCE_MBOX_TIMEOUT_MS)))
         return status;
     if (BCE_MB_TYPE(result) != BCE_MB_SET_FW_PROTOCOL_VERSION ||
         BCE_MB_VALUE(result) != BC_PROTOCOL_VERSION) {
@@ -251,7 +251,7 @@ static int bce_register_command_queue(struct apple_bce_device *bce, struct bce_q
     if (dma_mapping_error(&bce->pci->dev, a))
         return -ENOMEM;
     cmd_type = is_sq ? BCE_MB_REGISTER_COMMAND_SQ : BCE_MB_REGISTER_COMMAND_CQ;
-    status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(cmd_type, a), &result);
+    status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(cmd_type, a), &result, BCE_MBOX_TIMEOUT_MS);
     dma_unmap_single(&bce->pci->dev, a, sizeof(struct bce_queue_memcfg), DMA_TO_DEVICE);
     if (status)
         return status;
@@ -297,7 +297,7 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
     u64 resp;
     dma_addr_t dma_addr;
     void *dma_ptr = NULL;
-    size_t size = max(PAGE_SIZE, 4096UL);
+    size_t size = PAGE_SIZE;
 
     for (attempt = 0; attempt < 5; ++attempt) {
         pr_debug("apple-bce: suspend: attempt %i, buffer size %li\n", attempt, size);
@@ -308,7 +308,8 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
         }
         BUG_ON((dma_addr % 4096) != 0);
         status = bce_mailbox_send(&bce->mbox,
-                BCE_MB_MSG(BCE_MB_SAVE_STATE_AND_SLEEP, (dma_addr & ~(4096LLU - 1)) | (size / 4096)), &resp);
+                BCE_MB_MSG(BCE_MB_SAVE_STATE_AND_SLEEP, (dma_addr & ~(4096LLU - 1)) | (size / 4096)), &resp,
+                BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS);
         if (status) {
             pr_err("apple-bce: suspend failed (mailbox send)\n");
             break;
@@ -334,7 +335,8 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
     if (dma_ptr)
         dma_free_coherent(&bce->pci->dev, size, dma_ptr, dma_addr);
     if (!status)
-        return bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_SLEEP_NO_STATE, 0), &resp);
+        return bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_SLEEP_NO_STATE, 0), &resp,
+                BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS);
     return status;
 }
 
@@ -343,7 +345,8 @@ static int bce_restore_state_and_wake(struct apple_bce_device *bce)
     int status;
     u64 resp;
     if (!bce->saved_data_dma_ptr) {
-        if ((status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_RESTORE_NO_STATE, 0), &resp))) {
+        if ((status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_RESTORE_NO_STATE, 0), &resp,
+                BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS))) {
             pr_err("apple-bce: resume with no state failed (mailbox send)\n");
             return status;
         }
@@ -355,7 +358,8 @@ static int bce_restore_state_and_wake(struct apple_bce_device *bce)
     }
 
     if ((status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_RESTORE_STATE_AND_WAKE,
-            (bce->saved_data_dma_addr & ~(4096LLU - 1)) | (bce->saved_data_dma_size / 4096)), &resp))) {
+            (bce->saved_data_dma_addr & ~(4096LLU - 1)) | (bce->saved_data_dma_size / 4096)), &resp,
+            BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS))) {
         pr_err("apple-bce: resume with state failed (mailbox send)\n");
         goto finish_with_state;
     }
@@ -434,7 +438,7 @@ static int apple_bce_resume(struct device *dev)
     return 0;
 }
 
-static struct pci_device_id apple_bce_ids[  ] = {
+static const struct pci_device_id apple_bce_ids[  ] = {
         { PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x1801) },
         { 0, },
 };
@@ -442,7 +446,7 @@ static struct pci_device_id apple_bce_ids[  ] = {
 MODULE_DEVICE_TABLE(pci, apple_bce_ids);
 
 static SIMPLE_DEV_PM_OPS(apple_bce_pci_driver_pm, apple_bce_suspend, apple_bce_resume);
-struct pci_driver apple_bce_pci_driver = {
+static struct pci_driver apple_bce_pci_driver = {
         .name = "apple-bce",
         .id_table = apple_bce_ids,
         .probe = apple_bce_probe,

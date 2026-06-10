@@ -30,9 +30,12 @@ enum bce_message_type {
 #define BCE_MB_TYPE(v) ((u32) (v >> 58))
 #define BCE_MB_VALUE(v) (v & 0x3FFFFFFFFFFFFFFLL)
 
+#define BCE_MBOX_TIMEOUT_MS 200
+#define BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS 2000
+
 void bce_mailbox_init(struct bce_mailbox *mb, void __iomem *reg_mb);
 
-int bce_mailbox_send(struct bce_mailbox *mb, u64 msg, u64* recv);
+int bce_mailbox_send(struct bce_mailbox *mb, u64 msg, u64* recv, int timeout_ms);
 
 int bce_mailbox_handle_interrupt(struct bce_mailbox *mb);
 

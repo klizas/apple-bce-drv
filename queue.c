@@ -376,7 +376,9 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
 #endif
         return NULL;
     }
+    mutex_lock(&dev->queues_lock);
     dev->queues[qid] = (struct bce_queue *) cq;
+    mutex_unlock(&dev->queues_lock);
     return cq;
 }
 
@@ -494,7 +496,7 @@ EXPORT_SYMBOL_GPL(bce_destroy_cq);
 void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq)
 {
     if (!dev->is_being_removed && bce_cmd_unregister_memory_queue(dev->cmd_cmdq, (u16) sq->qid))
-        pr_err("apple-bce: CQ unregister failed");
+        pr_err("apple-bce: SQ unregister failed");
     mutex_lock(&dev->queues_lock);
     dev->queues[sq->qid] = NULL;
     mutex_unlock(&dev->queues_lock);
