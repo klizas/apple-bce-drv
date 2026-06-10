@@ -1341,7 +1341,7 @@ int __init bce_vhci_module_init(void)
     }
     return 0;
 }
-void __exit bce_vhci_module_exit(void)
+void bce_vhci_module_exit(void)
 {
     class_destroy(bce_vhci_class);
     unregister_chrdev_region(bce_vhci_chrdev, 1);
