@@ -80,6 +80,11 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     /* Gets the function 0's interface. This is needed because Apple only accepts DMA on our function if function 0
        is a bus master, so we need to work around this. */
     bce->pci0 = pci_get_slot(dev->bus, PCI_DEVFN(PCI_SLOT(dev->devfn), 0));
+    if (!bce->pci0) {
+        dev_warn(&dev->dev, "apple-bce: failed to find function 0\n");
+        status = -ENODEV;
+        goto fail_interrupt;
+    }
 #ifndef WITHOUT_NVME_PATCH
     if ((status = pci_enable_device_mem(bce->pci0))) {
         dev_warn(&dev->dev, "apple-bce: failed to enable function 0\n");
