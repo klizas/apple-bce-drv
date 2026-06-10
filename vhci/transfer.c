@@ -15,6 +15,7 @@ static int bce_vhci_urb_transfer_completion(struct bce_vhci_urb *urb, struct bce
 
 static void bce_vhci_transfer_queue_reset_w(struct work_struct *work);
 static void bce_vhci_transfer_queue_deferred_resume_w(struct work_struct *work);
+static void bce_vhci_transfer_queue_flush_w(struct work_struct *work);
 
 int bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transfer_queue *q,
         struct usb_host_endpoint *endp, bce_vhci_device_t dev_addr, enum dma_data_direction dir)
@@ -46,6 +47,8 @@ int bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transf
         return -ENOMEM;
     INIT_WORK(&q->w_reset, bce_vhci_transfer_queue_reset_w);
     INIT_WORK(&q->w_resume, bce_vhci_transfer_queue_deferred_resume_w);
+    INIT_WORK(&q->w_flush, bce_vhci_transfer_queue_flush_w);
+    INIT_LIST_HEAD(&q->flush_giveback_list);
     q->ghost_in_count = 0;
     q->sq_in = NULL;
     if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) {
@@ -77,8 +80,13 @@ fail:
 
 void bce_vhci_destroy_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transfer_queue *q)
 {
+    unsigned long flags;
     cancel_work_sync(&q->w_resume);
     cancel_work_sync(&q->w_reset);
+    cancel_work_sync(&q->w_flush);
+    spin_lock_irqsave(&q->urb_lock, flags);
+    list_splice_tail_init(&q->flush_giveback_list, &q->giveback_urb_list);
+    spin_unlock_irqrestore(&q->urb_lock, flags);
     bce_vhci_transfer_queue_giveback(q);
     bce_vhci_transfer_queue_remove_pending(q);
     if (q->sq_in)
@@ -578,30 +586,42 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
     usb_hcd_unlink_urb_from_ep(q->vhci->hcd, urb);
     urb->hcpriv = NULL;
 
-    /* Check if this was the last URB and ghosts are still in flight.
-     * If so, we must flush before returning so the caller (UVC) can
-     * safely free DMA buffers.  This only fires during teardown
-     * (STREAMOFF) — during normal streaming, new URBs keep the list
-     * non-empty so we never hit this path. */
-    {
-        bool need_flush = (q->ghost_in_count > 0 &&
-                           list_empty(&q->endp->urb_list));
+    /* If this was the last URB and ghosts are still in flight, flush
+     * before giving the URB back so the caller (UVC) can safely free
+     * DMA buffers.  urb_dequeue may run in atomic context, so the
+     * flush runs on tq_state_wq and the giveback is deferred with it —
+     * usb_kill_urb callers block until the flush completes.  This only
+     * fires during teardown (STREAMOFF) — during normal streaming, new
+     * URBs keep the list non-empty. */
+    if (q->ghost_in_count > 0 && list_empty(&q->endp->urb_list)) {
+        urb->status = status;
+        list_add_tail(&urb->urb_list, &q->flush_giveback_list);
         spin_unlock_irqrestore(&q->urb_lock, flags);
-
-        usb_hcd_giveback_urb(q->vhci->hcd, urb, status);
         kfree(vurb);
-
-        if (need_flush) {
-            bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
-            spin_lock_irqsave(&q->urb_lock, flags);
-            q->ghost_in_count = 0;
-            q->remaining_active_requests = q->max_active_requests;
-            spin_unlock_irqrestore(&q->urb_lock, flags);
-            bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
-        }
+        queue_work(q->vhci->tq_state_wq, &q->w_flush);
+        return 0;
     }
 
+    spin_unlock_irqrestore(&q->urb_lock, flags);
+    usb_hcd_giveback_urb(q->vhci->hcd, urb, status);
+    kfree(vurb);
+
     return 0;
+}
+
+static void bce_vhci_transfer_queue_flush_w(struct work_struct *work)
+{
+    struct bce_vhci_transfer_queue *q = container_of(work, struct bce_vhci_transfer_queue, w_flush);
+    unsigned long flags;
+
+    bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+    spin_lock_irqsave(&q->urb_lock, flags);
+    q->ghost_in_count = 0;
+    q->remaining_active_requests = q->max_active_requests;
+    list_splice_tail_init(&q->flush_giveback_list, &q->giveback_urb_list);
+    spin_unlock_irqrestore(&q->urb_lock, flags);
+    bce_vhci_transfer_queue_resume(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+    bce_vhci_transfer_queue_giveback(q);
 }
 
 /* Select the correct host-to-T2 message queue based on endpoint type.
