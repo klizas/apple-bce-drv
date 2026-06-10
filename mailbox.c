@@ -68,7 +68,10 @@ int bce_mailbox_handle_interrupt(struct bce_mailbox *mb)
 {
     int status = bce_mailbox_retrive_response(mb);
     if (!status) {
-        atomic_set(&mb->mb_status, 2);
+        if (atomic_cmpxchg(&mb->mb_status, 1, 2) != 1) {
+            pr_warn("bce_mailbox: dropping reply with no message in flight: %llx\n", mb->mb_result);
+            return -ENODATA;
+        }
         complete(&mb->mb_completion);
     }
     return status;
