@@ -706,7 +706,7 @@ int aaudio_module_init(void)
 {
     int result;
     if ((result = alloc_chrdev_region(&aaudio_chrdev, 0, 1, "aaudio")))
-        goto fail_chrdev;
+        return result;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     aaudio_class = class_create(THIS_MODULE, "aaudio");
 #else
@@ -714,15 +714,13 @@ int aaudio_module_init(void)
 #endif
     if (IS_ERR(aaudio_class)) {
         result = PTR_ERR(aaudio_class);
-        goto fail_class;
+        goto fail_chrdev;
     }
-    
-    result = pci_register_driver(&aaudio_pci_driver);
-    if (result)
-        goto fail_drv;
+
+    if ((result = pci_register_driver(&aaudio_pci_driver)))
+        goto fail_class;
     return 0;
 
-fail_drv:
 fail_class:
     class_destroy(aaudio_class);
 fail_chrdev:

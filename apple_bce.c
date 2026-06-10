@@ -453,7 +453,7 @@ static int __init apple_bce_module_init(void)
 {
     int result;
     if ((result = alloc_chrdev_region(&bce_chrdev, 0, 1, "apple-bce")))
-        goto fail_chrdev;
+        return result;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     bce_class = class_create(THIS_MODULE, "apple-bce");
 #else
@@ -461,22 +461,25 @@ static int __init apple_bce_module_init(void)
 #endif
     if (IS_ERR(bce_class)) {
         result = PTR_ERR(bce_class);
-        goto fail_class;
+        goto fail_chrdev;
     }
     if ((result = bce_vhci_module_init())) {
         pr_err("apple-bce: bce-vhci init failed");
         goto fail_class;
     }
 
-    result = pci_register_driver(&apple_bce_pci_driver);
-    if (result)
-        goto fail_drv;
+    if ((result = pci_register_driver(&apple_bce_pci_driver)))
+        goto fail_vhci;
 
-    aaudio_module_init();
+    if ((result = aaudio_module_init()))
+        goto fail_drv;
 
     return 0;
 
 fail_drv:
+    pci_unregister_driver(&apple_bce_pci_driver);
+fail_vhci:
+    bce_vhci_module_exit();
 fail_class:
     class_destroy(bce_class);
 fail_chrdev:
