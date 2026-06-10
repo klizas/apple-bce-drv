@@ -869,15 +869,15 @@ static int bce_vhci_urb_control_update(struct bce_vhci_urb *urb, struct bce_vhci
 static int bce_vhci_urb_control_transfer_completion(struct bce_vhci_urb *urb, struct bce_sq_completion_data *c)
 {
     int status;
-    unsigned long timeout;
 
     if (urb->state == BCE_VHCI_URB_CONTROL_WAITING_FOR_SETUP_COMPLETION) {
         if (c->data_size != sizeof(struct usb_ctrlrequest))
             pr_err("bce-vhci: [%02x] transfer complete data size mistmatch for usb_ctrlrequest (%llx instead of %lx)\n",
                    urb->q->endp_addr, c->data_size, sizeof(struct usb_ctrlrequest));
 
-        timeout = 1000;
-        status = bce_vhci_urb_data_start(urb, &timeout);
+        /* Runs under q->urb_lock from the completion path — must not sleep,
+         * so reserve without a timeout. */
+        status = bce_vhci_urb_data_start(urb, NULL);
         if (status) {
             bce_vhci_urb_complete(urb, status);
             return -ENOENT;
