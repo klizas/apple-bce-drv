@@ -99,8 +99,6 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
         goto fail_ts;
     }
 
-    global_bce = bce;
-
     if ((status = bce_vhci_create(bce, &bce->vhci))) {
         pr_err("apple-bce: VHCI creation failed\n");
         goto fail_vhci;
@@ -116,6 +114,8 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
                                      DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME);
     if (!bce->pci0_link)
         dev_warn(&dev->dev, "apple-bce: failed to create device link to function 0\n");
+
+    global_bce = bce;
 
     return 0;
 
@@ -259,6 +259,9 @@ static void apple_bce_remove(struct pci_dev *dev)
 {
     struct apple_bce_device *bce = pci_get_drvdata(dev);
     bce->is_being_removed = true;
+
+    if (global_bce == bce)
+        global_bce = NULL;
 
     bce_ave_destroy();
     bce_vhci_destroy(&bce->vhci);
@@ -483,9 +486,9 @@ fail_chrdev:
 }
 static void __exit apple_bce_module_exit(void)
 {
+    aaudio_module_exit();
     pci_unregister_driver(&apple_bce_pci_driver);
 
-    aaudio_module_exit();
     bce_vhci_module_exit();
     class_destroy(bce_class);
     unregister_chrdev_region(bce_chrdev, 1);
