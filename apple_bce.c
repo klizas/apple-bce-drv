@@ -315,6 +315,7 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
             return 0;
         } else if (BCE_MB_TYPE(resp) == BCE_MB_SAVE_STATE_AND_SLEEP_FAILURE) {
             dma_free_coherent(&bce->pci->dev, size, dma_ptr, dma_addr);
+            dma_ptr = NULL;
             /* The 0x10ff magic value was extracted from Apple's driver */
             size = (BCE_MB_VALUE(resp) + 0x10ff) & ~(4096LLU - 1);
             pr_debug("apple-bce: suspend: device requested a larger buffer (%li)\n", size);
