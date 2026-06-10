@@ -378,8 +378,10 @@ static int apple_bce_suspend(struct device *dev)
 
     bce_timestamp_stop(&bce->timestamp);
 
-    if ((status = bce_save_state_and_sleep(bce)))
+    if ((status = bce_save_state_and_sleep(bce))) {
+        bce_timestamp_start(&bce->timestamp, false);
         return status;
+    }
 
     /* Disable DMA IRQ after T2 is asleep. On resume, PCI core powers the
      * device back on before apple_bce_resume() runs — the disabled IRQ
@@ -439,10 +441,7 @@ static struct pci_device_id apple_bce_ids[  ] = {
 
 MODULE_DEVICE_TABLE(pci, apple_bce_ids);
 
-struct dev_pm_ops apple_bce_pci_driver_pm = {
-        .suspend = apple_bce_suspend,
-        .resume = apple_bce_resume
-};
+static SIMPLE_DEV_PM_OPS(apple_bce_pci_driver_pm, apple_bce_suspend, apple_bce_resume);
 struct pci_driver apple_bce_pci_driver = {
         .name = "apple-bce",
         .id_table = apple_bce_ids,
