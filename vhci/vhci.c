@@ -162,6 +162,13 @@ static int bce_vhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 
 static int bce_vhci_reset_device(struct bce_vhci *vhci, int index, u16 timeout);
 
+/* Command queue functions return positive bce_vhci_message_status values on
+ * firmware errors; USB core treats non-negative hub_control returns as success. */
+static int bce_vhci_cmd_status_to_errno(int status)
+{
+    return status > 0 ? -EIO : status;
+}
+
 static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u16 wIndex, char *buf, u16 wLength)
 {
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
@@ -212,7 +219,7 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
         }
 
         if ((status = bce_vhci_cmd_port_status(&vhci->cq, (u8) wIndex, 0, &port_status)))
-            return status;
+            return bce_vhci_cmd_status_to_errno(status);
 
         if (port_status & 16)
             ps->wPortStatus |= USB_PORT_STAT_ENABLE | USB_PORT_STAT_HIGH_SPEED;
@@ -239,35 +246,36 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
             /* As far as I am aware, power status is not part of the port status so store it separately */
             if (!status)
                 vhci->port_power_mask |= BIT(wIndex);
-            return status;
+            return bce_vhci_cmd_status_to_errno(status);
         }
         if (wValue == USB_PORT_FEAT_RESET) {
-            return bce_vhci_reset_device(vhci, wIndex, wValue);
+            return bce_vhci_cmd_status_to_errno(bce_vhci_reset_device(vhci, wIndex, wValue));
         }
         if (wValue == USB_PORT_FEAT_SUSPEND) {
             /* TODO: Am I supposed to also suspend the endpoints? */
             pr_debug("bce-vhci: Suspending port %i\n", wIndex);
-            return bce_vhci_cmd_port_suspend(&vhci->cq, (u8) wIndex);
+            return bce_vhci_cmd_status_to_errno(bce_vhci_cmd_port_suspend(&vhci->cq, (u8) wIndex));
         }
     } else if (typeReq == ClearPortFeature) {
         if (wValue == USB_PORT_FEAT_ENABLE)
-            return bce_vhci_cmd_port_disable(&vhci->cq, (u8) wIndex);
+            return bce_vhci_cmd_status_to_errno(bce_vhci_cmd_port_disable(&vhci->cq, (u8) wIndex));
         if (wValue == USB_PORT_FEAT_POWER) {
             status = bce_vhci_cmd_port_power_off(&vhci->cq, (u8) wIndex);
             if (!status)
                 vhci->port_power_mask &= ~BIT(wIndex);
-            return status;
+            return bce_vhci_cmd_status_to_errno(status);
         }
         if (wValue == USB_PORT_FEAT_C_CONNECTION) {
             clear_bit(wIndex, &vhci->port_resume_mask);
-            return bce_vhci_cmd_port_status(&vhci->cq, (u8) wIndex, 0x40000, &port_status);
+            return bce_vhci_cmd_status_to_errno(
+                    bce_vhci_cmd_port_status(&vhci->cq, (u8) wIndex, 0x40000, &port_status));
         }
         if (wValue == USB_PORT_FEAT_C_RESET) { /* I don't think I can transfer it in any way */
             return 0;
         }
         if (wValue == USB_PORT_FEAT_SUSPEND) {
             pr_debug("bce-vhci: Resuming port %i\n", wIndex);
-            return bce_vhci_cmd_port_resume(&vhci->cq, (u8) wIndex);
+            return bce_vhci_cmd_status_to_errno(bce_vhci_cmd_port_resume(&vhci->cq, (u8) wIndex));
         }
     }
     pr_err("bce-vhci: bce_vhci_hub_control unhandled request: %x %i %i [bufl=%i]\n", typeReq, wValue, wIndex, wLength);
