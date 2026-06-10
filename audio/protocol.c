@@ -249,7 +249,9 @@ void aaudio_msg_write_get_device_list(struct aaudio_msg *msg)
 #define CMD_SHARED_VARS \
     CMD_SHARED_VARS_NO_REPLY \
     struct aaudio_msg reply = aaudio_reply_alloc(); \
-    struct aaudio_msg *buf = &reply;
+    struct aaudio_msg *buf = &reply; \
+    if (!reply.data) \
+        return -ENOMEM;
 #define CMD_SEND_REQUEST(fn, ...) \
     if ((status = aaudio_send_cmd_sync(a, &sctx, buf, 500, fn, ##__VA_ARGS__))) \
         return status;
@@ -295,6 +297,8 @@ int aaudio_cmd_get_primitive_property(struct aaudio_device *a,
     struct aaudio_msg reply = aaudio_reply_alloc();
     void *r_data;
     u64 r_data_size;
+    if (!reply.data)
+        return -ENOMEM;
     if ((status = aaudio_cmd_get_property(a, &reply, devid, obj, prop, qualifier, qualifier_size,
             &r_data, &r_data_size)))
         goto finish;

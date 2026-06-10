@@ -252,6 +252,8 @@ static int aaudio_init_cmd(struct aaudio_device *a)
     dev_info(a->dev, "Continuing init\n");
 
     buf = aaudio_reply_alloc();
+    if (!buf.data)
+        return -ENOMEM;
     if ((status = aaudio_cmd_get_device_list(a, &buf, &dev_l, &dev_cnt))) {
         dev_err(a->dev, "Failed to get device list\n");
         aaudio_reply_free(&buf);
@@ -276,6 +278,8 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
     char *uid;
 
     sdev = kzalloc(sizeof(struct aaudio_subdevice), GFP_KERNEL);
+    if (!sdev || !buf.data)
+        goto fail;
 
     if (aaudio_cmd_get_property(a, &buf, dev_id, dev_id, AAUDIO_PROP(AAUDIO_PROP_SCOPE_GLOBAL, AAUDIO_PROP_UID, 0),
             NULL, 0, (void **) &uid, &uid_len) || uid_len > AAUDIO_DEVICE_MAX_UID_LEN) {
@@ -514,7 +518,8 @@ static void aaudio_init_bs_stream(struct aaudio_device *a, struct aaudio_stream 
 
     if (strm->buffer_cnt == 1) {
         strm->alsa_hw_desc = kmalloc(sizeof(struct snd_pcm_hardware), GFP_KERNEL);
-        if (aaudio_create_hw_info(&strm->desc, strm->alsa_hw_desc, strm->buffers[0].size)) {
+        if (!strm->alsa_hw_desc ||
+            aaudio_create_hw_info(&strm->desc, strm->alsa_hw_desc, strm->buffers[0].size)) {
             kfree(strm->alsa_hw_desc);
             strm->alsa_hw_desc = NULL;
         }
@@ -551,7 +556,8 @@ static void aaudio_init_bs_stream_host(struct aaudio_device *a, struct aaudio_st
     strm->host_allocated = true;
 
     strm->alsa_hw_desc = kmalloc(sizeof(struct snd_pcm_hardware), GFP_KERNEL);
-    if (aaudio_create_hw_info(&strm->desc, strm->alsa_hw_desc, strm->buffers[0].size)) {
+    if (!strm->alsa_hw_desc ||
+        aaudio_create_hw_info(&strm->desc, strm->alsa_hw_desc, strm->buffers[0].size)) {
         kfree(strm->alsa_hw_desc);
         strm->alsa_hw_desc = NULL;
     }
