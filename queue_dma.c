@@ -130,6 +130,8 @@ static struct bce_segment_list_element_hostinfo *bce_map_segment_list(
         if (el >= el_end) {
             /* allocate a new page, this will be also done for the first element */
             ptr = __get_free_page(GFP_KERNEL);
+            if (!ptr)
+                goto error;
             if (pptr && ptr == pptr + PAGE_SIZE) {
                 out->page_count++;
                 header->element_count += BCE_ELEMENTS_PER_ADDITIONAL_PAGE;
@@ -148,6 +150,10 @@ static struct bce_segment_list_element_hostinfo *bce_map_segment_list(
                     out = out->next;
                 } else {
                     out_root = out = kmalloc(sizeof(struct bce_segment_list_element_hostinfo), GFP_KERNEL);
+                }
+                if (!out) {
+                    free_page(ptr);
+                    goto error;
                 }
                 out->page_start = (void *) ptr;
                 out->page_count = 1;
