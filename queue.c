@@ -222,20 +222,12 @@ struct bce_queue_cmdq *bce_alloc_cmdq(struct apple_bce_device *dev, int qid, u32
         kfree(q);
         return NULL;
     }
-    q->slot_gen = kzalloc(sizeof(u32) * el_count, GFP_KERNEL);
-    if (!q->slot_gen) {
-        kfree(q->tres);
-        bce_free_sq(dev, q->sq);
-        kfree(q);
-        return NULL;
-    }
     return q;
 }
 
 void bce_free_cmdq(struct apple_bce_device *dev, struct bce_queue_cmdq *cmdq)
 {
     bce_free_sq(dev, cmdq->sq);
-    kfree(cmdq->slot_gen);
     kfree(cmdq->tres);
     kfree(cmdq);
 }
@@ -249,13 +241,12 @@ void bce_cmdq_completion(struct bce_queue_sq *q)
     spin_lock(&cmdq->lck);
     while ((result = bce_next_completion(q))) {
         el = cmdq->tres[cmdq->sq->head];
-        if (el && el->generation == cmdq->slot_gen[cmdq->sq->head]) {
+        if (el) {
             el->result = result->result;
             el->status = result->status;
             mb();
             complete(&el->cmpl);
         } else {
-            /* Slot was NULLed by a timeout or generation mismatch — discard */
             pr_debug("apple-bce: discarding late command completion\n");
         }
         cmdq->tres[cmdq->sq->head] = NULL;
@@ -277,7 +268,6 @@ static __always_inline void *bce_cmd_start(struct bce_queue_cmdq *cmdq, struct b
 
     spin_lock(&cmdq->lck);
     res->slot = cmdq->sq->tail;
-    res->generation = cmdq->slot_gen[cmdq->sq->tail];
     cmdq->tres[cmdq->sq->tail] = res;
     ret = bce_next_submission(cmdq->sq);
     return ret;
@@ -292,12 +282,7 @@ static __always_inline int bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bc
         pr_err("apple-bce: command queue timeout (slot %u)\n", res->slot);
         spin_lock(&cmdq->lck);
         cmdq->tres[res->slot] = NULL;
-        cmdq->slot_gen[res->slot]++;
         spin_unlock(&cmdq->lck);
-        /* Reclaim the slot so the queue doesn't deadlock. If T2 sends
-         * a late completion, bce_cmdq_completion will find tres[head]==NULL
-         * and discard it. */
-        bce_notify_submission_complete(cmdq->sq);
         return -ETIMEDOUT;
     }
     mb();
