@@ -286,10 +286,17 @@ static int bce_vhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
 
     pr_debug("bce_vhci_cmd_device_create %i -> %i\n", udev->portnum, devid);
 
-    vdev = kzalloc(sizeof(struct bce_vhci_device), GFP_KERNEL);
     if (devid >= 16) {
-        kfree(vdev);
-        return -EINVAL;
+        pr_err("bce_vhci: enable_device: port %d got out-of-range devid %d\n",
+                udev->portnum, devid);
+        bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+        return -EIO;
+    }
+
+    vdev = kzalloc(sizeof(struct bce_vhci_device), GFP_KERNEL);
+    if (!vdev) {
+        bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+        return -ENOMEM;
     }
     vhci->port_to_device[udev->portnum] = devid;
     vhci->devices[devid] = vdev;
