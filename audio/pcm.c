@@ -204,6 +204,9 @@ static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
             aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
             stream->started = 0;
             break;
+        case SNDRV_PCM_TRIGGER_SUSPEND:
+            /* IO already stopped by aaudio_suspend */
+            break;
         default:
             return -EINVAL;
     }
