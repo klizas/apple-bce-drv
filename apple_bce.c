@@ -190,10 +190,20 @@ static int bce_create_command_queues(struct apple_bce_device *bce)
 err_cfg:
     kfree(cfg);
 err:
-    if (bce->cmd_cq)
+    /* The DMA interrupt is already live and walks bce->queues[] — clear the
+     * entries under the lock before freeing the queues behind them. */
+    mutex_lock(&bce->queues_lock);
+    bce->queues[0] = NULL;
+    bce->queues[1] = NULL;
+    mutex_unlock(&bce->queues_lock);
+    if (bce->cmd_cq) {
         bce_free_cq(bce, bce->cmd_cq);
-    if (bce->cmd_cmdq)
+        bce->cmd_cq = NULL;
+    }
+    if (bce->cmd_cmdq) {
         bce_free_cmdq(bce, bce->cmd_cmdq);
+        bce->cmd_cmdq = NULL;
+    }
     return status;
 }
 
