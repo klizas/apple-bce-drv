@@ -511,6 +511,7 @@ int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb, gfp_
         bce_vhci_transfer_queue_deliver_pending(q);
     }
     spin_unlock_irqrestore(&q->urb_lock, flags);
+    bce_vhci_transfer_queue_giveback(q);
     pr_debug("bce-vhci: [%02x] URB enqueued (dir = %s, size = %i)\n", q->endp_addr,
             usb_urb_dir_in(urb) ? "IN" : "OUT", urb->transfer_buffer_length);
     return status;
