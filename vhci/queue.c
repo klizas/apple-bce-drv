@@ -246,14 +246,18 @@ static int __bce_vhci_command_queue_execute(struct bce_vhci_command_queue *cq, s
     if (!wait_for_completion_timeout(&c->completion, timeout)) {
         /* we ran out of time, send cancellation */
         pr_debug("bce-vhci: command timed out req=%x\n", req->cmd);
-        if ((status = bce_reserve_submission(cq->mq->sq, &timeout)))
+        if ((status = bce_reserve_submission(cq->mq->sq, &timeout))) {
+            spin_lock(&cq->completion_lock);
+            c->result = NULL;
+            spin_unlock(&cq->completion_lock);
             return status;
+        }
 
         creq = *req;
         creq.cmd |= 0x4000;
         bce_vhci_message_queue_write(cq->mq, &creq);
 
-        if (!wait_for_completion_timeout(&c->completion, 1000)) {
+        if (!wait_for_completion_timeout(&c->completion, msecs_to_jiffies(1000))) {
             spin_lock(&cq->completion_lock);
             c->result = NULL;
             spin_unlock(&cq->completion_lock);
