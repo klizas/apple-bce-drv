@@ -45,6 +45,10 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
         goto fail_eq;
 
     vhci->tq_state_wq = alloc_ordered_workqueue("bce-vhci-tq-state", 0);
+    if (!vhci->tq_state_wq) {
+        status = -ENOMEM;
+        goto fail_wq;
+    }
     INIT_WORK(&vhci->w_fw_events, bce_vhci_handle_firmware_events_w);
     INIT_WORK(&vhci->w_recovery, bce_vhci_recovery_w);
     INIT_DELAYED_WORK(&vhci->recovery_watchdog, bce_vhci_watchdog_w);
@@ -73,6 +77,8 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
 fail_add_hcd:
     usb_put_hcd(vhci->hcd);
 fail_hcd:
+    destroy_workqueue(vhci->tq_state_wq);
+fail_wq:
     bce_vhci_destroy_event_queues(vhci);
 fail_eq:
     bce_vhci_destroy_message_queues(vhci);
