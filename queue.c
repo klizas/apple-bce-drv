@@ -338,35 +338,41 @@ u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
 EXPORT_SYMBOL_GPL(bce_cmd_flush_memory_queue);
 
 
+static int bce_qid_alloc(struct apple_bce_device *dev)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
+    return ida_simple_get(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX, GFP_KERNEL);
+#else
+    return ida_alloc_range(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX - 1, GFP_KERNEL);
+#endif
+}
+
+static void bce_qid_free(struct apple_bce_device *dev, int qid)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
+    ida_simple_remove(&dev->queue_ida, (uint) qid);
+#else
+    ida_free(&dev->queue_ida, (uint) qid);
+#endif
+}
+
 struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
 {
     struct bce_queue_cq *cq;
     struct bce_queue_memcfg cfg;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-    int qid = ida_simple_get(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX, GFP_KERNEL);
-#else
-    int qid = ida_alloc_range(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX - 1, GFP_KERNEL);
-#endif
+    int qid = bce_qid_alloc(dev);
     if (qid < 0)
         return NULL;
     cq = bce_alloc_cq(dev, qid, el_count);
     if (!cq) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-        ida_simple_remove(&dev->queue_ida, (uint) qid);
-#else
-        ida_free(&dev->queue_ida, (uint) qid);
-#endif
+        bce_qid_free(dev, qid);
         return NULL;
     }
     bce_get_cq_memcfg(cq, &cfg);
     if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, NULL, 0) != 0) {
         pr_err("apple-bce: CQ registration failed (%i)", qid);
         bce_free_cq(dev, cq);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-        ida_simple_remove(&dev->queue_ida, (uint) qid);
-#else
-        ida_free(&dev->queue_ida, (uint) qid);
-#endif
+        bce_qid_free(dev, qid);
         return NULL;
     }
     mutex_lock(&dev->queues_lock);
@@ -380,48 +386,10 @@ EXPORT_SYMBOL_GPL(bce_create_cq);
 struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name, u32 el_count,
         int direction, bce_sq_completion compl, void *userdata)
 {
-    struct bce_queue_sq *sq;
-    struct bce_queue_memcfg cfg;
-    int qid;
-    u16 flags;
-    if (cq == NULL)
-        return NULL; /* cq can not be null */
-    if (name == NULL)
-        return NULL; /* name can not be null */
     if (direction != DMA_TO_DEVICE && direction != DMA_FROM_DEVICE)
         return NULL; /* unsupported direction */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-    qid = ida_simple_get(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX, GFP_KERNEL);
-#else
-    qid = ida_alloc_range(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX - 1, GFP_KERNEL);
-#endif
-    if (qid < 0)
-        return NULL;
-    sq = bce_alloc_sq(dev, qid, sizeof(struct bce_qe_submission), el_count, compl, userdata);
-    if (!sq) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-        ida_simple_remove(&dev->queue_ida, (uint) qid);
-#else
-        ida_free(&dev->queue_ida, (uint) qid);
-#endif
-        return NULL;
-    }
-    bce_get_sq_memcfg(sq, cq, &cfg);
-    flags = (u16) ((name ? 2 : 0) | ((direction != DMA_FROM_DEVICE) ? 1 : 0));
-    if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, name, flags) != 0) {
-        pr_err("apple-bce: SQ registration failed (%i)", qid);
-        bce_free_sq(dev, sq);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-        ida_simple_remove(&dev->queue_ida, (uint) qid);
-#else
-        ida_free(&dev->queue_ida, (uint) qid);
-#endif
-        return NULL;
-    }
-    mutex_lock(&dev->queues_lock);
-    dev->queues[qid] = (struct bce_queue *) sq;
-    mutex_unlock(&dev->queues_lock);
-    return sq;
+    return bce_create_sq_with_flags(dev, cq, name, el_count,
+            (u16) (2 | ((direction != DMA_FROM_DEVICE) ? 1 : 0)), compl, userdata);
 }
 
 struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name,
@@ -434,31 +402,19 @@ struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, stru
         return NULL;
     if (name == NULL)
         return NULL;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-    qid = ida_simple_get(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX, GFP_KERNEL);
-#else
-    qid = ida_alloc_range(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX - 1, GFP_KERNEL);
-#endif
+    qid = bce_qid_alloc(dev);
     if (qid < 0)
         return NULL;
     sq = bce_alloc_sq(dev, qid, sizeof(struct bce_qe_submission), el_count, compl, userdata);
     if (!sq) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-        ida_simple_remove(&dev->queue_ida, (uint) qid);
-#else
-        ida_free(&dev->queue_ida, (uint) qid);
-#endif
+        bce_qid_free(dev, qid);
         return NULL;
     }
     bce_get_sq_memcfg(sq, cq, &cfg);
     if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, name, flags) != 0) {
         pr_err("apple-bce: SQ registration failed (%i)", qid);
         bce_free_sq(dev, sq);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-        ida_simple_remove(&dev->queue_ida, (uint) qid);
-#else
-        ida_free(&dev->queue_ida, (uint) qid);
-#endif
+        bce_qid_free(dev, qid);
         return NULL;
     }
     mutex_lock(&dev->queues_lock);
@@ -476,11 +432,7 @@ void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
     mutex_lock(&dev->queues_lock);
     dev->queues[cq->qid] = NULL;
     mutex_unlock(&dev->queues_lock);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-    ida_simple_remove(&dev->queue_ida, (uint) cq->qid);
-#else
-    ida_free(&dev->queue_ida, (uint) cq->qid);
-#endif
+    bce_qid_free(dev, cq->qid);
     bce_free_cq(dev, cq);
 }
 
@@ -493,11 +445,7 @@ void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq)
     mutex_lock(&dev->queues_lock);
     dev->queues[sq->qid] = NULL;
     mutex_unlock(&dev->queues_lock);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-    ida_simple_remove(&dev->queue_ida, (uint) sq->qid);
-#else
-    ida_free(&dev->queue_ida, (uint) sq->qid);
-#endif
+    bce_qid_free(dev, sq->qid);
     bce_free_sq(dev, sq);
 }
 EXPORT_SYMBOL_GPL(bce_destroy_sq);
