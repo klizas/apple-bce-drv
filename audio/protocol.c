@@ -255,7 +255,10 @@ void aaudio_msg_write_get_device_list(struct aaudio_msg *msg)
         return status;
 #define CMD_DEF_SHARED_AND_SEND(fn, ...) \
     CMD_SHARED_VARS \
-    CMD_SEND_REQUEST(fn, ##__VA_ARGS__);
+    if ((status = aaudio_send_cmd_sync(a, &sctx, buf, 500, fn, ##__VA_ARGS__))) { \
+        aaudio_reply_free(&reply); \
+        return status; \
+    }
 #define CMD_DEF_SHARED_NO_REPLY_AND_SEND(fn, ...) \
     CMD_SHARED_VARS_NO_REPLY \
     CMD_SEND_REQUEST(fn, ##__VA_ARGS__);
