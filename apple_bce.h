@@ -14,6 +14,8 @@
 #define BCE_QUEUE_USER_MIN 2
 #define BCE_QUEUE_USER_MAX (BCE_MAX_QUEUE_COUNT - 1)
 
+struct ave_device;
+
 struct apple_bce_device {
     struct pci_dev *pci, *pci0;
     struct device_link *pci0_link;
@@ -36,8 +38,13 @@ struct apple_bce_device {
     size_t saved_data_dma_size;
 
     struct bce_vhci vhci;
+    struct ave_device *ave;
 };
 
 extern struct apple_bce_device *global_bce;
+
+int bce_ave_create(struct apple_bce_device *bce);
+void bce_ave_destroy(struct apple_bce_device *bce);
+void bce_ave_suspend(struct apple_bce_device *bce);
 
 #endif //APPLE_BCE_H
