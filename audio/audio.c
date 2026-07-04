@@ -43,6 +43,8 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
         status = -ENOMEM;
         goto fail;
     }
+    init_completion(&aaudio->remote_alive);
+    INIT_LIST_HEAD(&aaudio->subdevice_list);
 
     aaudio->bce = global_bce;
     if (!aaudio->bce) {
@@ -61,9 +63,6 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
         goto fail;
     }
     device_link_add(aaudio->dev, aaudio->bce->dev, DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);
-
-    init_completion(&aaudio->remote_alive);
-    INIT_LIST_HEAD(&aaudio->subdevice_list);
 
     /* Init: set an unknown flag in the bitset */
     if (pci_read_config_dword(dev, 4, &cfg))
@@ -93,9 +92,9 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
         goto fail_bce;
     }
 
-    strcpy(aaudio->card->shortname, "Apple T2 Audio");
-    strcpy(aaudio->card->longname, "Apple T2 Audio");
-    strcpy(aaudio->card->mixername, "Apple T2 Audio");
+    strscpy(aaudio->card->shortname, "Apple T2 Audio", sizeof(aaudio->card->shortname));
+    strscpy(aaudio->card->longname, "Apple T2 Audio", sizeof(aaudio->card->longname));
+    strscpy(aaudio->card->mixername, "Apple T2 Audio", sizeof(aaudio->card->mixername));
     /* Dynamic alsa ids start at 100 */
     aaudio->next_alsa_id = 100;
 
@@ -141,6 +140,11 @@ fail_bce:
     aaudio_bce_free(aaudio);
 fail:
     if (aaudio) {
+        while (!list_empty(&aaudio->subdevice_list)) {
+            sdev = list_first_entry(&aaudio->subdevice_list, struct aaudio_subdevice, list);
+            list_del(&sdev->list);
+            aaudio_free_dev(sdev);
+        }
         if (!IS_ERR_OR_NULL(aaudio->reg_mem_bs))
             pci_iounmap(dev, aaudio->reg_mem_bs);
         if (!IS_ERR_OR_NULL(aaudio->reg_mem_cfg))
@@ -175,7 +179,6 @@ static void aaudio_remove(struct pci_dev *dev)
     pci_iounmap(dev, aaudio->reg_mem_bs);
     pci_iounmap(dev, aaudio->reg_mem_cfg);
     device_destroy(aaudio_class, aaudio->devt);
-    pci_free_irq_vectors(dev);
     pci_release_regions(dev);
     pci_disable_device(dev);
     kfree(aaudio);
@@ -240,7 +243,8 @@ static int aaudio_init_cmd(struct aaudio_device *a)
     int status;
     struct aaudio_send_ctx sctx;
     struct aaudio_msg buf;
-    u64 dev_cnt, dev_i;
+    u64 dev_cnt, dev_max, dev_i;
+    size_t dev_off;
     aaudio_device_id_t *dev_l;
 
     if ((status = aaudio_send(a, &sctx, 500,
@@ -262,6 +266,13 @@ static int aaudio_init_cmd(struct aaudio_device *a)
         dev_err(a->dev, "Failed to get device list\n");
         aaudio_reply_free(&buf);
         return status;
+    }
+    /* dev_cnt comes from the device; make sure the id list actually fits in the reply */
+    dev_off = (size_t) ((u8 *) dev_l - (u8 *) buf.data);
+    dev_max = buf.size > dev_off ? (buf.size - dev_off) / sizeof(aaudio_device_id_t) : 0;
+    if (dev_cnt > dev_max) {
+        dev_warn(a->dev, "Device list count %llu exceeds reply size, clamping to %llu\n", dev_cnt, dev_max);
+        dev_cnt = dev_max;
     }
     for (dev_i = 0; dev_i < dev_cnt; ++dev_i)
         aaudio_init_dev(a, dev_l[dev_i]);
@@ -482,6 +493,10 @@ static int aaudio_init_bs(struct aaudio_device *a)
         a->bs->num_devices = ++i;
     }
     list_for_each_entry(sdev, &a->subdevice_list, list) {
+        /* Subdevices that did not get a BufferStruct slot (e.g. when the
+         * device array was full) must not index bs->devices with 0xff. */
+        if (sdev->buf_id == AAUDIO_BUFFER_ID_NONE)
+            continue;
         if (sdev->in_stream_cnt == 1) {
             dev_info(a->dev, "aaudio: Device %i Host Stream; Input\n", sdev->buf_id);
             aaudio_init_bs_stream_host(a, &sdev->in_streams[0], &a->bs->devices[sdev->buf_id].input_streams[0]);
@@ -552,6 +567,12 @@ static void aaudio_init_bs_stream_host(struct aaudio_device *a, struct aaudio_st
     strm->buffers = kmalloc_array(strm->buffer_cnt, sizeof(struct aaudio_dma_buf), GFP_KERNEL);
     if (!strm->buffers) {
         dev_err(a->dev, "Buffer list allocation failed\n");
+        /* Untell the device about the buffer we are about to free */
+        bs_strm->num_buffers = 0;
+        bs_strm->buffers[0].address = 0;
+        bs_strm->buffers[0].size = 0;
+        strm->buffer_cnt = 0;
+        dma_free_coherent(&a->pci->dev, size, dma_ptr, dma_addr);
         return;
     }
     strm->buffers[0].dma_addr = dma_addr;
@@ -652,7 +673,11 @@ void aaudio_handle_prop_change(struct aaudio_device *a, struct aaudio_msg *msg)
         return;
     work->a = a;
     INIT_WORK(&work->ws, aaudio_handle_prop_change_work);
-    aaudio_msg_read_property_changed(msg, &work->dev, &work->obj, &work->prop);
+    if (aaudio_msg_read_property_changed(msg, &work->dev, &work->obj, &work->prop)) {
+        dev_err(a->dev, "Failed to read property changed notification\n");
+        kfree(work);
+        return;
+    }
     schedule_work(&work->ws);
 }
 

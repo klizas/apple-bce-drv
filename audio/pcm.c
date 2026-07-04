@@ -70,6 +70,14 @@ int aaudio_create_hw_info(struct aaudio_apple_description *desc, struct snd_pcm_
         size_t buf_size)
 {
     uint rate;
+    /* The descriptor comes from a device property query; if that query
+     * failed it is all zeros and would cause divisions by zero here, in
+     * the period-size constraint and in the timestamp handler. */
+    if (!desc->bytes_per_packet || !desc->frames_per_packet || !desc->channels_per_frame) {
+        pr_err("aaudio: invalid stream descriptor (bpp=%u fpp=%u ch=%u)\n",
+                desc->bytes_per_packet, desc->frames_per_packet, desc->channels_per_frame);
+        return -EINVAL;
+    }
     alsa_hw->info = (SNDRV_PCM_INFO_MMAP |
                      SNDRV_PCM_INFO_BLOCK_TRANSFER |
                      SNDRV_PCM_INFO_MMAP_VALID |
@@ -82,6 +90,10 @@ int aaudio_create_hw_info(struct aaudio_apple_description *desc, struct snd_pcm_
     if (!alsa_hw->formats)
         return -EINVAL;
     rate = (uint) aaudio_double_to_u64(desc->sample_rate_double);
+    if (!rate) {
+        pr_err("aaudio: invalid stream descriptor sample rate\n");
+        return -EINVAL;
+    }
     alsa_hw->rates = snd_pcm_rate_to_rate_bit(rate);
     alsa_hw->rate_min = rate;
     alsa_hw->rate_max = rate;
@@ -111,6 +123,11 @@ static int aaudio_pcm_open(struct snd_pcm_substream *substream)
 {
     struct aaudio_stream *stream = aaudio_pcm_stream(substream);
     pr_debug("aaudio_pcm_open\n");
+    /* The PCM device is registered before the BufferStruct is parsed; if the
+     * stream never got usable buffers or its descriptor was rejected, the hw
+     * description is missing and the stream cannot be used. */
+    if (!stream->alsa_hw_desc)
+        return -ENXIO;
     substream->runtime->hw = *stream->alsa_hw_desc;
 
     /* Period size must be a multiple of the hardware packet size */
@@ -268,7 +285,7 @@ static int aaudio_pcm_ack(struct snd_pcm_substream *substream)
     return 0;
 }
 
-static struct snd_pcm_ops aaudio_pcm_ops = {
+static const struct snd_pcm_ops aaudio_pcm_ops = {
         .open =        aaudio_pcm_open,
         .close =       aaudio_pcm_close,
         .ioctl =       snd_pcm_lib_ioctl,
@@ -306,7 +323,7 @@ int aaudio_create_pcm(struct aaudio_subdevice *sdev)
     pcm->private_data = sdev;
     pcm->nonatomic = 1;
     sdev->pcm = pcm;
-    strcpy(pcm->name, sdev->uid);
+    strscpy(pcm->name, sdev->uid, sizeof(pcm->name));
     snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &aaudio_pcm_ops);
     snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &aaudio_pcm_ops);
     return 0;
