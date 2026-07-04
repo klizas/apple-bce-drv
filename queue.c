@@ -13,6 +13,7 @@ struct bce_queue_cq *bce_alloc_cq(struct apple_bce_device *dev, int qid, u32 el_
     q->qid = qid;
     q->type = BCE_QUEUE_CQ;
     q->el_count = el_count;
+    INIT_LIST_HEAD(&q->node);
     q->data = dma_alloc_coherent(&dev->pci->dev, el_count * sizeof(struct bce_qe_completion),
             &q->dma_handle, GFP_KERNEL);
     if (!q->data) {
@@ -377,6 +378,7 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
     }
     mutex_lock(&dev->queues_lock);
     dev->queues[qid] = (struct bce_queue *) cq;
+    list_add_tail(&cq->node, &dev->cq_list);
     mutex_unlock(&dev->queues_lock);
     return cq;
 }
@@ -431,6 +433,7 @@ void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
         pr_err("apple-bce: CQ unregister failed");
     mutex_lock(&dev->queues_lock);
     dev->queues[cq->qid] = NULL;
+    list_del(&cq->node);
     mutex_unlock(&dev->queues_lock);
     bce_qid_free(dev, cq->qid);
     bce_free_cq(dev, cq);

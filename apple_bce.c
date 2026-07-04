@@ -65,6 +65,7 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     bce_timestamp_init(&bce->timestamp, bce->reg_mem_mb);
 
     mutex_init(&bce->queues_lock);
+    INIT_LIST_HEAD(&bce->cq_list);
     ida_init(&bce->queue_ida);
 
     if ((status = pci_request_irq(dev, 0, bce_handle_mb_irq, NULL, dev, "bce_mbox")))
@@ -166,8 +167,13 @@ static int bce_create_command_queues(struct apple_bce_device *bce)
         status = -ENOMEM;
         goto err;
     }
+    /* The DMA interrupt is already live and walks queues[]/cq_list, so
+     * publish the queues under the lock. */
+    mutex_lock(&bce->queues_lock);
     bce->queues[0] = (struct bce_queue *) bce->cmd_cq;
     bce->queues[1] = (struct bce_queue *) bce->cmd_cmdq->sq;
+    list_add_tail(&bce->cmd_cq->node, &bce->cq_list);
+    mutex_unlock(&bce->queues_lock);
 
     cfg = kzalloc(sizeof(struct bce_queue_memcfg), GFP_KERNEL);
     if (!cfg) {
@@ -187,9 +193,12 @@ static int bce_create_command_queues(struct apple_bce_device *bce)
 err_cfg:
     kfree(cfg);
 err:
-    /* The DMA interrupt is already live and walks bce->queues[] — clear the
-     * entries under the lock before freeing the queues behind them. */
+    /* The DMA interrupt is already live and walks bce->queues[]/cq_list —
+     * clear the entries under the lock before freeing the queues behind
+     * them. queues[0] is only set once the CQ is on cq_list. */
     mutex_lock(&bce->queues_lock);
+    if (bce->queues[0])
+        list_del(&bce->cmd_cq->node);
     bce->queues[0] = NULL;
     bce->queues[1] = NULL;
     mutex_unlock(&bce->queues_lock);
@@ -206,11 +215,16 @@ err:
 
 static void bce_free_command_queues(struct apple_bce_device *bce)
 {
+    /* Unpublish before freeing: in the probe failure path the DMA
+     * interrupt is still live at this point. */
+    mutex_lock(&bce->queues_lock);
+    list_del(&bce->cmd_cq->node);
+    bce->queues[0] = NULL;
+    bce->queues[1] = NULL;
+    mutex_unlock(&bce->queues_lock);
     bce_free_cq(bce, bce->cmd_cq);
     bce_free_cmdq(bce, bce->cmd_cmdq);
     bce->cmd_cq = NULL;
-    bce->queues[0] = NULL;
-    bce->queues[1] = NULL;
 }
 
 static irqreturn_t bce_handle_mb_irq(int irq, void *dev)
@@ -222,12 +236,11 @@ static irqreturn_t bce_handle_mb_irq(int irq, void *dev)
 
 static irqreturn_t bce_handle_dma_irq(int irq, void *dev)
 {
-    int i;
     struct apple_bce_device *bce = pci_get_drvdata(dev);
+    struct bce_queue_cq *cq;
     mutex_lock(&bce->queues_lock);
-    for (i = 0; i < BCE_MAX_QUEUE_COUNT; i++)
-        if (bce->queues[i] && bce->queues[i]->type == BCE_QUEUE_CQ)
-            bce_handle_cq_completions(bce, (struct bce_queue_cq *) bce->queues[i]);
+    list_for_each_entry(cq, &bce->cq_list, node)
+        bce_handle_cq_completions(bce, cq);
     mutex_unlock(&bce->queues_lock);
     return IRQ_HANDLED;
 }

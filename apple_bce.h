@@ -23,6 +23,7 @@ struct apple_bce_device {
     struct bce_mailbox mbox;
     struct bce_timestamp timestamp;
     struct bce_queue *queues[BCE_MAX_QUEUE_COUNT];
+    struct list_head cq_list; /* live CQs, polled by the DMA interrupt */
     struct mutex queues_lock;
     struct ida queue_ida;
     struct bce_queue_cq *cmd_cq;

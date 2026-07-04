@@ -24,6 +24,11 @@ struct bce_queue_cq {
     void *data;
 
     u32 index;
+
+    /* Entry in apple_bce_device.cq_list; the DMA interrupt polls only this
+     * list instead of scanning the whole queues[] table. Protected by
+     * apple_bce_device.queues_lock. */
+    struct list_head node;
 };
 struct bce_queue_sq;
 typedef void (*bce_sq_completion)(struct bce_queue_sq *q);
