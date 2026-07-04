@@ -71,14 +71,18 @@ static void bce_handle_cq_completion(struct apple_bce_device *dev, struct bce_qe
     target_sq->completion_tail = (target_sq->completion_tail + 1) % target_sq->el_count;
 }
 
-void bce_handle_cq_completions(struct apple_bce_device *dev, struct bce_queue_cq *cq)
+/* Harvest all pending completion elements from a CQ into the per-SQ
+ * completion_data rings and acknowledge them to the device. Runs NO
+ * completion callbacks — SQs with newly harvested work are appended to
+ * dev->int_sq_list starting at index ce; the updated count is returned.
+ * This keeps CQ acknowledgment latency independent of handler runtime:
+ * the caller polls every CQ first and only then dispatches handlers. */
+size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t ce)
 {
-    size_t ce = 0;
     struct bce_qe_completion *e;
-    struct bce_queue_sq *sq;
     e = bce_cq_element(cq, cq->index);
     if (!(e->flags & BCE_COMPLETION_FLAG_PENDING))
-        return;
+        return ce;
     mb();
     while (true) {
         e = bce_cq_element(cq, cq->index);
@@ -91,6 +95,15 @@ void bce_handle_cq_completions(struct apple_bce_device *dev, struct bce_queue_cq
     }
     mb();
     iowrite32(cq->index, (u32 *) ((u8 *) dev->reg_mem_dma +  REG_DOORBELL_BASE) + cq->qid);
+    return ce;
+}
+
+/* Run the completion callbacks for the first ce SQs collected in
+ * dev->int_sq_list by bce_poll_cq(). Single caller context only (the DMA
+ * irq thread) — int_sq_list is shared scratch. */
+void bce_dispatch_sq_completions(struct apple_bce_device *dev, size_t ce)
+{
+    struct bce_queue_sq *sq;
     while (ce) {
         --ce;
         sq = dev->int_sq_list[ce];

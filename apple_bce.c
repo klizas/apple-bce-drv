@@ -248,6 +248,7 @@ static irqreturn_t bce_handle_dma_irq(int irq, void *dev)
 {
     struct apple_bce_device *bce = pci_get_drvdata(dev);
     struct bce_queue_cq *cq;
+    size_t ce = 0;
     int idx;
 
     /* SRCU (not the queues_lock mutex): completion handlers may sleep, and
@@ -255,9 +256,13 @@ static irqreturn_t bce_handle_dma_irq(int irq, void *dev)
      * processing. Teardown unpublishes a queue and then synchronize_srcu()s
      * before freeing it. */
     idx = srcu_read_lock(&bce->queues_srcu);
+    /* Two phases: harvest and acknowledge every CQ first, then run the
+     * handlers — a slow completion handler must not delay acking the other
+     * queues towards the device. */
     list_for_each_entry_rcu(cq, &bce->cq_list, node,
                             srcu_read_lock_held(&bce->queues_srcu))
-        bce_handle_cq_completions(bce, cq);
+        ce = bce_poll_cq(bce, cq, ce);
+    bce_dispatch_sq_completions(bce, ce);
     srcu_read_unlock(&bce->queues_srcu, idx);
     return IRQ_HANDLED;
 }

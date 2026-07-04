@@ -151,7 +151,8 @@ static __always_inline struct bce_sq_completion_data *bce_next_completion(struct
 struct bce_queue_cq *bce_alloc_cq(struct apple_bce_device *dev, int qid, u32 el_count);
 void bce_get_cq_memcfg(struct bce_queue_cq *cq, struct bce_queue_memcfg *cfg);
 void bce_free_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq);
-void bce_handle_cq_completions(struct apple_bce_device *dev, struct bce_queue_cq *cq);
+size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t ce);
+void bce_dispatch_sq_completions(struct apple_bce_device *dev, size_t ce);
 
 struct bce_queue_sq *bce_alloc_sq(struct apple_bce_device *dev, int qid, u32 el_size, u32 el_count,
         bce_sq_completion compl, void *userdata);
