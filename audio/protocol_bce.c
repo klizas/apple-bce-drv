@@ -12,11 +12,7 @@ int aaudio_bce_init(struct aaudio_device *dev)
 {
     int status;
     struct aaudio_bce *bce = &dev->bcem;
-    /* Vector field 1: steer this CQ's completions to a spare MSI vector so
-     * audio handling doesn't serialize behind USB completions on bce_dma.
-     * The device-side interpretation is unverified — all spare vectors have
-     * handlers, and registration falls back to 0 if the value is rejected. */
-    bce->cq = bce_create_cq_on_vector(dev->bce, 0x80, 1);
+    bce->cq = bce_create_cq(dev->bce, 0x80);
     spin_lock_init(&bce->spinlock);
     if (!bce->cq)
         return -EINVAL;
