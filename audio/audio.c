@@ -551,7 +551,7 @@ static void aaudio_init_bs_stream_host(struct aaudio_device *a, struct aaudio_st
     size_t size;
     dma_addr_t dma_addr;
     void *dma_ptr;
-    size = strm->desc.bytes_per_packet * 4096;
+    size = strm->desc.bytes_per_packet * 16640;
     dma_ptr = dma_alloc_coherent(&a->pci->dev, size, &dma_addr, GFP_KERNEL);
     if (!dma_ptr) {
         dev_err(a->dev, "dma_alloc_coherent failed\n");
