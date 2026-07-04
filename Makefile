@@ -1,6 +1,6 @@
 obj-m += apple-bce.o
 
-apple-bce-objs := apple_bce.o mailbox.o queue.o queue_dma.o vhci/vhci.o vhci/queue.o vhci/transfer.o audio/audio.o audio/protocol.o audio/protocol_bce.o audio/pcm.o
+apple-bce-objs := apple_bce.o mailbox.o queue.o vhci/vhci.o vhci/queue.o vhci/transfer.o audio/audio.o audio/protocol.o audio/protocol_bce.o audio/pcm.o
 
 MY_CFLAGS += -DWITHOUT_NVME_PATCH
 #MY_CFLAGS += -g -DDEBUG
