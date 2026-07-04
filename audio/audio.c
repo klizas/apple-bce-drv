@@ -53,6 +53,10 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
         status = -EINVAL;
         goto fail;
     }
+    /* Force this device to unbind before apple-bce so global_bce cannot
+     * dangle while aaudio is bound. */
+    if (!device_link_add(&dev->dev, &aaudio->bce->pci->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
+        dev_warn(&dev->dev, "aaudio: failed to create device link to apple-bce\n");
 
     aaudio->pci = dev;
     pci_set_drvdata(dev, aaudio);
