@@ -146,6 +146,12 @@ static int aaudio_pcm_close(struct snd_pcm_substream *substream)
 
 static int aaudio_pcm_prepare(struct snd_pcm_substream *substream)
 {
+    struct aaudio_stream *stream = aaudio_pcm_stream(substream);
+
+    /* Expose the device/stream pipeline latency through runtime->delay
+     * (added to the buffer fill by snd_pcm_calc_delay()) instead of
+     * skewing the hw pointer by it in aaudio_pcm_pointer(). */
+    substream->runtime->delay = stream->latency;
     return 0;
 }
 
@@ -179,7 +185,10 @@ static void aaudio_pcm_start(struct snd_pcm_substream *substream)
     time_start = ktime_get();
 
     stream->waiting_for_first_ts = true;
-    stream->frame_min = stream->latency;
+    /* The pointer is no longer skewed back by the latency, so the startup
+     * floor is 0 — the old latency floor existed to keep the skewed value
+     * from going negative. */
+    stream->frame_min = 0;
     stream->elapsed_count = 0;
 
     s = frames_to_bytes(substream->runtime, substream->runtime->control->appl_ptr);
@@ -257,9 +266,8 @@ static snd_pcm_uframes_t aaudio_pcm_pointer(struct snd_pcm_substream *substream)
         else
             stream->frame_min = 0; /* Heavy desync */
     }
-    frames -= stream->latency;
-    if (frames < 0)
-        frames += ((-frames - 1) / substream->runtime->buffer_size + 1) * substream->runtime->buffer_size;
+    /* Return the true consumption position; the pipeline latency is
+     * reported separately via runtime->delay (set in prepare). */
     return (snd_pcm_uframes_t) frames;
 }
 
