@@ -20,6 +20,7 @@ static int aaudio_init_cmd(struct aaudio_device *a);
 static int aaudio_init_bs(struct aaudio_device *a);
 static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id);
 static void aaudio_free_dev(struct aaudio_subdevice *sdev);
+static void aaudio_ts_work(struct work_struct *ws);
 
 static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
@@ -305,6 +306,8 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
 
     sdev->a = a;
     INIT_LIST_HEAD(&sdev->list);
+    INIT_WORK(&sdev->ts_work, aaudio_ts_work);
+    spin_lock_init(&sdev->ts_lock);
     sdev->dev_id = dev_id;
     sdev->buf_id = AAUDIO_BUFFER_ID_NONE;
     strncpy(sdev->uid, uid, uid_len);
@@ -388,6 +391,7 @@ static void aaudio_init_stream_info(struct aaudio_subdevice *sdev, struct aaudio
 static void aaudio_free_dev(struct aaudio_subdevice *sdev)
 {
     size_t i;
+    cancel_work_sync(&sdev->ts_work);
     for (i = 0; i < sdev->in_stream_cnt; i++) {
         if (sdev->in_streams[i].alsa_hw_desc)
             kfree(sdev->in_streams[i].alsa_hw_desc);
@@ -689,6 +693,19 @@ void aaudio_handle_prop_change(struct aaudio_device *a, struct aaudio_msg *msg)
     if (aaudio_send_with_tag(a, sctx, ((struct aaudio_msg_header *) msg->data)->tag, 0, fn, ##__VA_ARGS__)) \
         pr_err_ratelimited("aaudio: Failed to reply to a command\n");
 
+static void aaudio_ts_work(struct work_struct *ws)
+{
+    struct aaudio_subdevice *sdev = container_of(ws, struct aaudio_subdevice, ts_work);
+    ktime_t time_os;
+    u64 dev_timestamp;
+
+    spin_lock(&sdev->ts_lock);
+    time_os = sdev->ts_time_os;
+    dev_timestamp = sdev->ts_dev_timestamp;
+    spin_unlock(&sdev->ts_lock);
+    aaudio_handle_timestamp(sdev, time_os, dev_timestamp);
+}
+
 void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg)
 {
     ktime_t time_os = ktime_get_boottime();
@@ -699,8 +716,13 @@ void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg
     dev_dbg(a->dev, "Received timestamp update for dev=%llx ts=%llx seed=%llx\n", devid, timestamp, update_seed);
 
     sdev = aaudio_find_dev_by_dev_id(a, devid);
-    if (sdev)
-        aaudio_handle_timestamp(sdev, time_os, timestamp);
+    if (sdev) {
+        spin_lock(&sdev->ts_lock);
+        sdev->ts_time_os = time_os;
+        sdev->ts_dev_timestamp = timestamp;
+        spin_unlock(&sdev->ts_lock);
+        schedule_work(&sdev->ts_work);
+    }
 
     aaudio_send_cmd_response(a, &sctx, msg,
             aaudio_msg_write_update_timestamp_response);
