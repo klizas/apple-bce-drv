@@ -101,8 +101,6 @@ void bce_vhci_destroy(struct bce_vhci *vhci)
     destroy_workqueue(vhci->tq_state_wq);
     bce_vhci_destroy_event_queues(vhci);
     bce_vhci_destroy_message_queues(vhci);
-    cancel_work_sync(&vhci->w_recovery);
-    cancel_delayed_work_sync(&vhci->recovery_watchdog);
     device_destroy(bce_vhci_class, vhci->vdevt);
     usb_put_hcd(vhci->hcd);
 }
