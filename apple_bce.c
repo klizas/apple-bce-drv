@@ -109,9 +109,6 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
         goto fail_vhci;
     }
 
-    if ((status = bce_ave_create(bce)))
-        pr_warn("apple-bce: AVE encoder init failed (%d), continuing without video\n", status);
-
     /* The T2 chip requires function 0 (NVMe) to be a bus master for DMA
      * on our function. Create a device link for runtime PM ordering.
      * (System S3 ordering is already handled by PCI function numbering.) */
@@ -278,7 +275,6 @@ static void apple_bce_remove(struct pci_dev *dev)
     if (global_bce == bce)
         global_bce = NULL;
 
-    bce_ave_destroy();
     bce_vhci_destroy(&bce->vhci);
 
     if (bce->pci0_link)

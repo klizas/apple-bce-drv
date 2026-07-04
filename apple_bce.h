@@ -38,7 +38,4 @@ struct apple_bce_device {
 
 extern struct apple_bce_device *global_bce;
 
-int bce_ave_create(struct apple_bce_device *bce);
-void bce_ave_destroy(void);
-
 #endif //APPLE_BCE_H
