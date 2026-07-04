@@ -225,13 +225,13 @@ static void aaudio_pcm_start(struct snd_pcm_substream *substream)
     if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
         /* Backup MMIO buffer before start_io (which may clear it),
          * then restore the pre-filled audio data afterwards. */
-        buf = kmalloc(s, GFP_KERNEL);
+        buf = kvmalloc(s, GFP_KERNEL);
         if (buf)
             memcpy_fromio(buf, substream->runtime->dma_area, s);
         aaudio_cmd_start_io(sdev->a, sdev->dev_id);
         if (buf) {
             memcpy_toio(substream->runtime->dma_area, buf, s);
-            kfree(buf);
+            kvfree(buf);
         }
     } else {
         aaudio_cmd_start_io(sdev->a, sdev->dev_id);
