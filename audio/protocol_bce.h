@@ -7,7 +7,12 @@
 #define AAUDIO_BCE_QUEUE_ELEMENT_SIZE 0x1000
 #define AAUDIO_BCE_QUEUE_ELEMENT_COUNT 20
 
-#define AAUDIO_BCE_QUEUE_TAG_COUNT 1000
+/* Tag space for matching replies to in-flight commands. Only
+ * AAUDIO_BCE_QUEUE_ELEMENT_COUNT commands can be outstanding at once; 100
+ * tags keeps the reuse distance 5x the queue depth (a stale reply would
+ * have to arrive 80 commands late to be misdelivered) while the wire
+ * format stays "S%03d". Sizes the pending_entries table below. */
+#define AAUDIO_BCE_QUEUE_TAG_COUNT 100
 
 struct aaudio_device;
 
