@@ -690,8 +690,10 @@ void aaudio_handle_prop_change(struct aaudio_device *a, struct aaudio_msg *msg)
  * out-queue means the T2 stopped consuming and blocking here would stall
  * completion processing for the entire driver. */
 #define aaudio_send_cmd_response(a, sctx, msg, fn, ...) \
-    if (aaudio_send_with_tag(a, sctx, ((struct aaudio_msg_header *) msg->data)->tag, 0, fn, ##__VA_ARGS__)) \
-        pr_err_ratelimited("aaudio: Failed to reply to a command\n");
+    do { \
+        if (aaudio_send_with_tag(a, sctx, ((struct aaudio_msg_header *) msg->data)->tag, 0, fn, ##__VA_ARGS__)) \
+            pr_err_ratelimited("aaudio: Failed to reply to a command\n"); \
+    } while (0)
 
 static void aaudio_ts_work(struct work_struct *ws)
 {
