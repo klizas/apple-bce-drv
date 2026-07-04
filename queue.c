@@ -49,7 +49,7 @@ static void bce_handle_cq_completion(struct apple_bce_device *dev, struct bce_qe
         pr_err("Device sent a response for qid (%u) >= BCE_MAX_QUEUE_COUNT\n", e->qid);
         return;
     }
-    target = dev->queues[e->qid];
+    target = READ_ONCE(dev->queues[e->qid]);
     if (!target || target->type != BCE_QUEUE_SQ) {
         pr_err("Device sent a response for qid (%u), which does not exist\n", e->qid);
         return;
@@ -377,8 +377,8 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
         return NULL;
     }
     mutex_lock(&dev->queues_lock);
-    dev->queues[qid] = (struct bce_queue *) cq;
-    list_add_tail(&cq->node, &dev->cq_list);
+    rcu_assign_pointer(dev->queues[qid], (struct bce_queue *) cq);
+    list_add_tail_rcu(&cq->node, &dev->cq_list);
     mutex_unlock(&dev->queues_lock);
     return cq;
 }
@@ -420,7 +420,7 @@ struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, stru
         return NULL;
     }
     mutex_lock(&dev->queues_lock);
-    dev->queues[qid] = (struct bce_queue *) sq;
+    rcu_assign_pointer(dev->queues[qid], (struct bce_queue *) sq);
     mutex_unlock(&dev->queues_lock);
     return sq;
 }
@@ -433,8 +433,10 @@ void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
         pr_err("apple-bce: CQ unregister failed");
     mutex_lock(&dev->queues_lock);
     dev->queues[cq->qid] = NULL;
-    list_del(&cq->node);
+    list_del_rcu(&cq->node);
     mutex_unlock(&dev->queues_lock);
+    /* Wait for a DMA irq pass that may still be polling this CQ */
+    synchronize_srcu(&dev->queues_srcu);
     bce_qid_free(dev, cq->qid);
     bce_free_cq(dev, cq);
 }
@@ -448,6 +450,9 @@ void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq)
     mutex_lock(&dev->queues_lock);
     dev->queues[sq->qid] = NULL;
     mutex_unlock(&dev->queues_lock);
+    /* Wait for a DMA irq pass that may still reference this SQ via
+     * queues[] or be running its completion callback */
+    synchronize_srcu(&dev->queues_srcu);
     bce_qid_free(dev, sq->qid);
     bce_free_sq(dev, sq);
 }

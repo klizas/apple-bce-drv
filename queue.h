@@ -26,8 +26,9 @@ struct bce_queue_cq {
     u32 index;
 
     /* Entry in apple_bce_device.cq_list; the DMA interrupt polls only this
-     * list instead of scanning the whole queues[] table. Protected by
-     * apple_bce_device.queues_lock. */
+     * list instead of scanning the whole queues[] table. Writers add/remove
+     * under queues_lock with RCU list ops; the DMA irq reads it under
+     * queues_srcu. */
     struct list_head node;
 };
 struct bce_queue_sq;

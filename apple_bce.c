@@ -42,6 +42,11 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
         status = -ENOMEM;
         goto fail;
     }
+    if ((status = init_srcu_struct(&bce->queues_srcu))) {
+        kfree(bce);
+        bce = NULL;
+        goto fail;
+    }
 
     bce->pci = dev;
     pci_set_drvdata(dev, bce);
@@ -136,14 +141,16 @@ fail_interrupt:
 fail_interrupt_0:
     pci_free_irq(dev, 0, dev);
 fail:
-    if (bce && bce->dev) {
-        device_destroy(bce_class, bce->devt);
+    if (bce) {
+        if (bce->dev) {
+            device_destroy(bce_class, bce->devt);
 
-        if (!IS_ERR_OR_NULL(bce->reg_mem_mb))
-            pci_iounmap(dev, bce->reg_mem_mb);
-        if (!IS_ERR_OR_NULL(bce->reg_mem_dma))
-            pci_iounmap(dev, bce->reg_mem_dma);
-
+            if (!IS_ERR_OR_NULL(bce->reg_mem_mb))
+                pci_iounmap(dev, bce->reg_mem_mb);
+            if (!IS_ERR_OR_NULL(bce->reg_mem_dma))
+                pci_iounmap(dev, bce->reg_mem_dma);
+        }
+        cleanup_srcu_struct(&bce->queues_srcu);
         kfree(bce);
     }
 
@@ -168,11 +175,11 @@ static int bce_create_command_queues(struct apple_bce_device *bce)
         goto err;
     }
     /* The DMA interrupt is already live and walks queues[]/cq_list, so
-     * publish the queues under the lock. */
+     * publish the queues under the writer lock, with RCU-aware stores. */
     mutex_lock(&bce->queues_lock);
-    bce->queues[0] = (struct bce_queue *) bce->cmd_cq;
-    bce->queues[1] = (struct bce_queue *) bce->cmd_cmdq->sq;
-    list_add_tail(&bce->cmd_cq->node, &bce->cq_list);
+    rcu_assign_pointer(bce->queues[0], (struct bce_queue *) bce->cmd_cq);
+    rcu_assign_pointer(bce->queues[1], (struct bce_queue *) bce->cmd_cmdq->sq);
+    list_add_tail_rcu(&bce->cmd_cq->node, &bce->cq_list);
     mutex_unlock(&bce->queues_lock);
 
     cfg = kzalloc(sizeof(struct bce_queue_memcfg), GFP_KERNEL);
@@ -194,14 +201,16 @@ err_cfg:
     kfree(cfg);
 err:
     /* The DMA interrupt is already live and walks bce->queues[]/cq_list —
-     * clear the entries under the lock before freeing the queues behind
-     * them. queues[0] is only set once the CQ is on cq_list. */
+     * unpublish the entries and wait out in-flight readers before freeing
+     * the queues behind them. queues[0] is only set once the CQ is on
+     * cq_list. */
     mutex_lock(&bce->queues_lock);
     if (bce->queues[0])
-        list_del(&bce->cmd_cq->node);
+        list_del_rcu(&bce->cmd_cq->node);
     bce->queues[0] = NULL;
     bce->queues[1] = NULL;
     mutex_unlock(&bce->queues_lock);
+    synchronize_srcu(&bce->queues_srcu);
     if (bce->cmd_cq) {
         bce_free_cq(bce, bce->cmd_cq);
         bce->cmd_cq = NULL;
@@ -215,13 +224,14 @@ err:
 
 static void bce_free_command_queues(struct apple_bce_device *bce)
 {
-    /* Unpublish before freeing: in the probe failure path the DMA
-     * interrupt is still live at this point. */
+    /* Unpublish and wait out readers before freeing: in the probe failure
+     * path the DMA interrupt is still live at this point. */
     mutex_lock(&bce->queues_lock);
-    list_del(&bce->cmd_cq->node);
+    list_del_rcu(&bce->cmd_cq->node);
     bce->queues[0] = NULL;
     bce->queues[1] = NULL;
     mutex_unlock(&bce->queues_lock);
+    synchronize_srcu(&bce->queues_srcu);
     bce_free_cq(bce, bce->cmd_cq);
     bce_free_cmdq(bce, bce->cmd_cmdq);
     bce->cmd_cq = NULL;
@@ -238,10 +248,17 @@ static irqreturn_t bce_handle_dma_irq(int irq, void *dev)
 {
     struct apple_bce_device *bce = pci_get_drvdata(dev);
     struct bce_queue_cq *cq;
-    mutex_lock(&bce->queues_lock);
-    list_for_each_entry(cq, &bce->cq_list, node)
+    int idx;
+
+    /* SRCU (not the queues_lock mutex): completion handlers may sleep, and
+     * queue creation/destruction must not serialize against completion
+     * processing. Teardown unpublishes a queue and then synchronize_srcu()s
+     * before freeing it. */
+    idx = srcu_read_lock(&bce->queues_srcu);
+    list_for_each_entry_rcu(cq, &bce->cq_list, node,
+                            srcu_read_lock_held(&bce->queues_srcu))
         bce_handle_cq_completions(bce, cq);
-    mutex_unlock(&bce->queues_lock);
+    srcu_read_unlock(&bce->queues_srcu, idx);
     return IRQ_HANDLED;
 }
 
@@ -307,6 +324,7 @@ static void apple_bce_remove(struct pci_dev *dev)
     pci_free_irq_vectors(dev);
     pci_release_regions(dev);
     pci_disable_device(dev);
+    cleanup_srcu_struct(&bce->queues_srcu);
     kfree(bce);
 }
 

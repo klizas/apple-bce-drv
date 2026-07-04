@@ -3,6 +3,7 @@
 
 #include <linux/pci.h>
 #include <linux/mutex.h>
+#include <linux/srcu.h>
 #include "mailbox.h"
 #include "queue.h"
 #include "vhci/vhci.h"
@@ -24,7 +25,8 @@ struct apple_bce_device {
     struct bce_timestamp timestamp;
     struct bce_queue *queues[BCE_MAX_QUEUE_COUNT];
     struct list_head cq_list; /* live CQs, polled by the DMA interrupt */
-    struct mutex queues_lock;
+    struct mutex queues_lock; /* serializes queue publish/unpublish (writers) */
+    struct srcu_struct queues_srcu; /* protects readers (DMA irq) against queue teardown */
     struct ida queue_ida;
     struct bce_queue_cq *cmd_cq;
     struct bce_queue_cmdq *cmd_cmdq;
