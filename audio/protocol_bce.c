@@ -185,7 +185,6 @@ static void aaudio_bce_in_queue_completion(struct bce_queue_sq *sq)
     struct bce_sq_completion_data *c;
     size_t cnt = 0;
 
-    mb();
     while ((c = bce_next_completion(sq))) {
         msg.data = (u8 *) q->data + q->data_head * q->el_size;
         msg.size = c->data_size;

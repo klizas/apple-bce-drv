@@ -67,8 +67,8 @@ static void bce_handle_cq_completion(struct apple_bce_device *dev, struct bce_qe
     cmpl->status = e->status;
     cmpl->data_size = e->data_size;
     cmpl->result = e->result;
-    wmb();
-    target_sq->completion_tail = (target_sq->completion_tail + 1) % target_sq->el_count;
+    smp_wmb();
+    WRITE_ONCE(target_sq->completion_tail, (target_sq->completion_tail + 1) % target_sq->el_count);
 }
 
 /* Harvest all pending completion elements from a CQ into the per-SQ
@@ -83,17 +83,16 @@ size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t
     e = bce_cq_element(cq, cq->index);
     if (!(e->flags & BCE_COMPLETION_FLAG_PENDING))
         return ce;
-    mb();
     while (true) {
         e = bce_cq_element(cq, cq->index);
         if (!(e->flags & BCE_COMPLETION_FLAG_PENDING))
             break;
+        dma_rmb();
         // pr_info("apple-bce: compl: %i: %i %llx %llx", e->qid, e->status, e->data_size, e->result);
         bce_handle_cq_completion(dev, e, &ce);
         e->flags = 0;
         cq->index = (cq->index + 1) % cq->el_count;
     }
-    mb();
     iowrite32(cq->index, (u32 *) ((u8 *) dev->reg_mem_dma +  REG_DOORBELL_BASE) + cq->qid);
     return ce;
 }
@@ -188,7 +187,6 @@ EXPORT_SYMBOL_GPL(bce_next_submission);
 
 void bce_submit_to_device(struct bce_queue_sq *sq)
 {
-    mb();
     iowrite32(sq->tail, (u32 *) ((u8 *) sq->reg_mem_dma +  REG_DOORBELL_BASE) + sq->qid);
 }
 EXPORT_SYMBOL_GPL(bce_submit_to_device);
@@ -251,7 +249,6 @@ void bce_cmdq_completion(struct bce_queue_sq *q)
         if (el) {
             el->result = result->result;
             el->status = result->status;
-            mb();
             complete(&el->cmpl);
         } else {
             pr_debug("apple-bce: discarding late command completion\n");
@@ -267,7 +264,6 @@ static __always_inline void *bce_cmd_start(struct bce_queue_cmdq *cmdq, struct b
     void *ret;
     unsigned long timeout;
     init_completion(&res->cmpl);
-    mb();
 
     timeout = msecs_to_jiffies(1000L * 60 * 5); /* wait for up to ~5 minutes */
     if (bce_reserve_submission(cmdq->sq, &timeout))
@@ -292,7 +288,6 @@ static __always_inline int bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bc
         spin_unlock(&cmdq->lck);
         return -ETIMEDOUT;
     }
-    mb();
     return 0;
 }
 

@@ -140,9 +140,9 @@ static __always_inline void *bce_cq_element(struct bce_queue_cq *q, int i) {
 
 static __always_inline struct bce_sq_completion_data *bce_next_completion(struct bce_queue_sq *sq) {
     struct bce_sq_completion_data *res;
-    rmb();
-    if (sq->completion_cidx == sq->completion_tail)
+    if (sq->completion_cidx == READ_ONCE(sq->completion_tail))
         return NULL;
+    smp_rmb();
     res = &sq->completion_data[sq->completion_cidx];
     sq->completion_cidx = (sq->completion_cidx + 1) % sq->el_count;
     return res;
