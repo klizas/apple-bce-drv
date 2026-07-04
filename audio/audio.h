@@ -64,6 +64,7 @@ struct aaudio_stream {
     bool host_allocated;
 
     bool waiting_for_first_ts;
+    s64 buffer_time_ns; /* buffer duration, precomputed in .prepare for the pointer callback */
 
     ktime_t remote_timestamp;
     snd_pcm_sframes_t frame_min;

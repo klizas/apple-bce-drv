@@ -152,6 +152,8 @@ static int aaudio_pcm_prepare(struct snd_pcm_substream *substream)
      * (added to the buffer fill by snd_pcm_calc_delay()) instead of
      * skewing the hw pointer by it in aaudio_pcm_pointer(). */
     substream->runtime->delay = stream->latency;
+    stream->buffer_time_ns = (s64) NSEC_PER_SEC * substream->runtime->buffer_size /
+                             substream->runtime->rate;
     return 0;
 }
 
@@ -253,7 +255,9 @@ static snd_pcm_uframes_t aaudio_pcm_pointer(struct snd_pcm_substream *substream)
     time_from_start = ktime_get_boottime() - stream->remote_timestamp;
     if (ktime_to_ns(time_from_start) < 0)
         return 0;
-    buffer_time_length = NSEC_PER_SEC * substream->runtime->buffer_size / substream->runtime->rate;
+    buffer_time_length = stream->buffer_time_ns;
+    if (buffer_time_length <= 0)
+        return 0;
     frames = (ktime_to_ns(time_from_start) % buffer_time_length) * (snd_pcm_sframes_t)substream->runtime->buffer_size / buffer_time_length;
     if (ktime_to_ns(time_from_start) < buffer_time_length) {
         if (frames < stream->frame_min)
