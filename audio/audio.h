@@ -76,6 +76,7 @@ struct aaudio_stream {
     struct delayed_work period_work;
     struct snd_pcm_substream *pcm_substream;
     unsigned long period_jiffies;
+    unsigned long period_next;
 };
 struct aaudio_subdevice {
     struct aaudio_device *a;

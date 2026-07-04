@@ -123,12 +123,20 @@ static void aaudio_pcm_period_work(struct work_struct *ws)
 {
     struct aaudio_stream *stream = container_of(to_delayed_work(ws),
             struct aaudio_stream, period_work);
+    long delay;
 
     if (!stream->started)
         return;
     snd_pcm_period_elapsed(stream->pcm_substream);
-    if (stream->started)
-        schedule_delayed_work(&stream->period_work, stream->period_jiffies);
+    if (!stream->started)
+        return;
+    stream->period_next += stream->period_jiffies;
+    delay = (long) (stream->period_next - jiffies);
+    if (delay < 0) {
+        stream->period_next = jiffies;
+        delay = 0;
+    }
+    schedule_delayed_work(&stream->period_work, delay);
 }
 
 static int aaudio_pcm_open(struct snd_pcm_substream *substream)
@@ -246,8 +254,10 @@ static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
         case SNDRV_PCM_TRIGGER_START:
             aaudio_pcm_start(substream);
             stream->started = 1;
-            if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+            if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+                stream->period_next = jiffies + stream->period_jiffies;
                 schedule_delayed_work(&stream->period_work, stream->period_jiffies);
+            }
             break;
         case SNDRV_PCM_TRIGGER_STOP:
             aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
