@@ -119,6 +119,18 @@ static struct aaudio_stream *aaudio_pcm_stream(struct snd_pcm_substream *substre
         return &sdev->in_streams[substream->number];
 }
 
+static void aaudio_pcm_period_work(struct work_struct *ws)
+{
+    struct aaudio_stream *stream = container_of(to_delayed_work(ws),
+            struct aaudio_stream, period_work);
+
+    if (!stream->started)
+        return;
+    snd_pcm_period_elapsed(stream->pcm_substream);
+    if (stream->started)
+        schedule_delayed_work(&stream->period_work, stream->period_jiffies);
+}
+
 static int aaudio_pcm_open(struct snd_pcm_substream *substream)
 {
     struct aaudio_stream *stream = aaudio_pcm_stream(substream);
@@ -130,6 +142,9 @@ static int aaudio_pcm_open(struct snd_pcm_substream *substream)
         return -ENXIO;
     substream->runtime->hw = *stream->alsa_hw_desc;
 
+    stream->pcm_substream = substream;
+    INIT_DELAYED_WORK(&stream->period_work, aaudio_pcm_period_work);
+
     /* Period size must be a multiple of the hardware packet size */
     snd_pcm_hw_constraint_step(substream->runtime, 0,
             SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
@@ -140,7 +155,9 @@ static int aaudio_pcm_open(struct snd_pcm_substream *substream)
 
 static int aaudio_pcm_close(struct snd_pcm_substream *substream)
 {
+    struct aaudio_stream *stream = aaudio_pcm_stream(substream);
     pr_debug("aaudio_pcm_close\n");
+    cancel_delayed_work_sync(&stream->period_work);
     return 0;
 }
 
@@ -154,6 +171,9 @@ static int aaudio_pcm_prepare(struct snd_pcm_substream *substream)
     substream->runtime->delay = stream->latency;
     stream->buffer_time_ns = (s64) NSEC_PER_SEC * substream->runtime->buffer_size /
                              substream->runtime->rate;
+    stream->period_jiffies = max_t(unsigned long, 1,
+            usecs_to_jiffies(div_u64((u64) substream->runtime->period_size * USEC_PER_SEC,
+                                     substream->runtime->rate)));
     return 0;
 }
 
@@ -191,7 +211,6 @@ static void aaudio_pcm_start(struct snd_pcm_substream *substream)
      * floor is 0 — the old latency floor existed to keep the skewed value
      * from going negative. */
     stream->frame_min = 0;
-    stream->elapsed_count = 0;
 
     s = frames_to_bytes(substream->runtime, substream->runtime->control->appl_ptr);
 
@@ -227,13 +246,17 @@ static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
         case SNDRV_PCM_TRIGGER_START:
             aaudio_pcm_start(substream);
             stream->started = 1;
+            if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+                schedule_delayed_work(&stream->period_work, stream->period_jiffies);
             break;
         case SNDRV_PCM_TRIGGER_STOP:
             aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
             stream->started = 0;
+            cancel_delayed_work(&stream->period_work);
             break;
         case SNDRV_PCM_TRIGGER_SUSPEND:
             /* IO already stopped by aaudio_suspend */
+            cancel_delayed_work(&stream->period_work);
             break;
         default:
             return -EINVAL;
@@ -346,7 +369,6 @@ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, 
     unsigned long flags;
     struct aaudio_stream *stream;
     struct snd_pcm_runtime *runtime;
-    snd_pcm_uframes_t period_size;
 
     stream = aaudio_pcm_stream(substream);
     snd_pcm_stream_lock_irqsave(substream, flags);
@@ -363,21 +385,10 @@ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, 
         snd_pcm_stream_unlock_irqrestore(substream, flags);
         return;
     }
-    period_size = runtime->period_size;
     snd_pcm_stream_unlock_irqrestore(substream, flags);
 
-    /* Only fire period_elapsed once per period's worth of hardware packets.
-     * Count timestamps rather than using wall-clock time so that bursty
-     * message delivery (e.g. after a scheduling delay) doesn't swallow
-     * period notifications. */
-    if (period_size) {
-        unsigned int packets_per_period = period_size /
-                                          stream->desc.frames_per_packet;
-        stream->elapsed_count++;
-        if (packets_per_period > 1 && stream->elapsed_count < packets_per_period)
-            return;
-        stream->elapsed_count = 0;
-    }
+    /* The T2 sends one timestamp per pass over the whole ring (16640
+     * frames, ~347ms at 48kHz), not per hardware packet. */
     snd_pcm_period_elapsed(substream);
 }
 

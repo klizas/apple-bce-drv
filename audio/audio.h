@@ -69,7 +69,13 @@ struct aaudio_stream {
     ktime_t remote_timestamp;
     snd_pcm_sframes_t frame_min;
     int started;
-    unsigned int elapsed_count;
+
+    /* The T2 only signals once per pass over the whole ring, so capture
+     * substreams get period wakeups from this self-rearming work instead;
+     * the pointer callback interpolates the position between signals. */
+    struct delayed_work period_work;
+    struct snd_pcm_substream *pcm_substream;
+    unsigned long period_jiffies;
 };
 struct aaudio_subdevice {
     struct aaudio_device *a;
