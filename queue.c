@@ -28,7 +28,7 @@ void bce_get_cq_memcfg(struct bce_queue_cq *cq, struct bce_queue_memcfg *cfg)
 {
     cfg->qid = (u16) cq->qid;
     cfg->el_count = (u16) cq->el_count;
-    cfg->vector_or_cq = 0;
+    cfg->vector_or_cq = cq->vector_or_cq;
     cfg->_pad = 0;
     cfg->addr = cq->dma_handle;
     cfg->length = cq->el_count * sizeof(struct bce_qe_completion);
@@ -40,7 +40,8 @@ void bce_free_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
     kfree(cq);
 }
 
-static void bce_handle_cq_completion(struct apple_bce_device *dev, struct bce_qe_completion *e, size_t *ce)
+static void bce_handle_cq_completion(struct apple_bce_device *dev, struct bce_qe_completion *e, size_t *ce,
+        struct bce_queue_sq **sq_list)
 {
     struct bce_queue *target;
     struct bce_queue_sq *target_sq;
@@ -61,7 +62,7 @@ static void bce_handle_cq_completion(struct apple_bce_device *dev, struct bce_qe
     }
     if (!target_sq->has_pending_completions) {
         target_sq->has_pending_completions = true;
-        dev->int_sq_list[(*ce)++] = target_sq;
+        sq_list[(*ce)++] = target_sq;
     }
     cmpl = &target_sq->completion_data[e->completion_index];
     cmpl->status = e->status;
@@ -74,10 +75,14 @@ static void bce_handle_cq_completion(struct apple_bce_device *dev, struct bce_qe
 /* Harvest all pending completion elements from a CQ into the per-SQ
  * completion_data rings and acknowledge them to the device. Runs NO
  * completion callbacks — SQs with newly harvested work are appended to
- * dev->int_sq_list starting at index ce; the updated count is returned.
+ * sq_list starting at index ce; the updated count is returned.
  * This keeps CQ acknowledgment latency independent of handler runtime:
- * the caller polls every CQ first and only then dispatches handlers. */
-size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t ce)
+ * the caller polls every CQ first and only then dispatches handlers.
+ * A CQ must only ever be polled by its owning irq context (see
+ * bce_queue_cq.vector_or_cq) — cq->index and the per-SQ completion state
+ * are single-consumer. */
+size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t ce,
+        struct bce_queue_sq **sq_list)
 {
     struct bce_qe_completion *e;
     e = bce_cq_element(cq, cq->index);
@@ -89,7 +94,7 @@ size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t
         if (!(e->flags & BCE_COMPLETION_FLAG_PENDING))
             break;
         // pr_info("apple-bce: compl: %i: %i %llx %llx", e->qid, e->status, e->data_size, e->result);
-        bce_handle_cq_completion(dev, e, &ce);
+        bce_handle_cq_completion(dev, e, &ce, sq_list);
         e->flags = 0;
         cq->index = (cq->index + 1) % cq->el_count;
     }
@@ -98,15 +103,15 @@ size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t
     return ce;
 }
 
-/* Run the completion callbacks for the first ce SQs collected in
- * dev->int_sq_list by bce_poll_cq(). Single caller context only (the DMA
- * irq thread) — int_sq_list is shared scratch. */
-void bce_dispatch_sq_completions(struct apple_bce_device *dev, size_t ce)
+/* Run the completion callbacks for the first ce SQs collected in sq_list
+ * by bce_poll_cq(). sq_list is the calling irq context's own scratch. */
+void bce_dispatch_sq_completions(struct apple_bce_device *dev, size_t ce,
+        struct bce_queue_sq **sq_list)
 {
     struct bce_queue_sq *sq;
     while (ce) {
         --ce;
-        sq = dev->int_sq_list[ce];
+        sq = sq_list[ce];
         sq->completion(sq);
         sq->has_pending_completions = false;
     }
@@ -372,6 +377,13 @@ static void bce_qid_free(struct apple_bce_device *dev, int qid)
 
 struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
 {
+    return bce_create_cq_on_vector(dev, el_count, 0);
+}
+
+EXPORT_SYMBOL_GPL(bce_create_cq);
+
+struct bce_queue_cq *bce_create_cq_on_vector(struct apple_bce_device *dev, u32 el_count, u16 vector)
+{
     struct bce_queue_cq *cq;
     struct bce_queue_memcfg cfg;
     int qid = bce_qid_alloc(dev);
@@ -382,12 +394,21 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
         bce_qid_free(dev, qid);
         return NULL;
     }
+    cq->vector_or_cq = vector;
     bce_get_cq_memcfg(cq, &cfg);
     if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, NULL, 0) != 0) {
-        pr_err("apple-bce: CQ registration failed (%i)", qid);
-        bce_free_cq(dev, cq);
-        bce_qid_free(dev, qid);
-        return NULL;
+        if (vector) {
+            pr_warn("apple-bce: CQ (%i) registration on vector %u rejected, falling back to the default vector\n",
+                    qid, vector);
+            cq->vector_or_cq = 0;
+            bce_get_cq_memcfg(cq, &cfg);
+        }
+        if (vector == 0 || bce_cmd_register_queue(dev->cmd_cmdq, &cfg, NULL, 0) != 0) {
+            pr_err("apple-bce: CQ registration failed (%i)", qid);
+            bce_free_cq(dev, cq);
+            bce_qid_free(dev, qid);
+            return NULL;
+        }
     }
     mutex_lock(&dev->queues_lock);
     rcu_assign_pointer(dev->queues[qid], (struct bce_queue *) cq);
@@ -396,7 +417,7 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
     return cq;
 }
 
-EXPORT_SYMBOL_GPL(bce_create_cq);
+EXPORT_SYMBOL_GPL(bce_create_cq_on_vector);
 
 struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name, u32 el_count,
         int direction, bce_sq_completion compl, void *userdata)

@@ -23,6 +23,12 @@ struct bce_queue_cq {
     dma_addr_t dma_handle;
     void *data;
 
+    /* Raw memcfg vector field sent to the device at registration. 0 is the
+     * default DMA vector (MSI 4); nonzero requests steering to a spare MSI
+     * vector. Also selects the polling owner: 0 → bce_dma handler, nonzero
+     * → the shared aux handler. */
+    u16 vector_or_cq;
+
     u32 index;
 
     /* Entry in apple_bce_device.cq_list; the DMA interrupt polls only this
@@ -151,8 +157,10 @@ static __always_inline struct bce_sq_completion_data *bce_next_completion(struct
 struct bce_queue_cq *bce_alloc_cq(struct apple_bce_device *dev, int qid, u32 el_count);
 void bce_get_cq_memcfg(struct bce_queue_cq *cq, struct bce_queue_memcfg *cfg);
 void bce_free_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq);
-size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t ce);
-void bce_dispatch_sq_completions(struct apple_bce_device *dev, size_t ce);
+size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t ce,
+        struct bce_queue_sq **sq_list);
+void bce_dispatch_sq_completions(struct apple_bce_device *dev, size_t ce,
+        struct bce_queue_sq **sq_list);
 
 struct bce_queue_sq *bce_alloc_sq(struct apple_bce_device *dev, int qid, u32 el_size, u32 el_count,
         bce_sq_completion compl, void *userdata);
@@ -177,6 +185,7 @@ u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
 /* User API - Creates and registers the queue */
 
 struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count);
+struct bce_queue_cq *bce_create_cq_on_vector(struct apple_bce_device *dev, u32 el_count, u16 vector);
 struct bce_queue_sq *bce_create_sq(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name, u32 el_count,
         int direction, bce_sq_completion compl, void *userdata);
 struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, struct bce_queue_cq *cq, const char *name,

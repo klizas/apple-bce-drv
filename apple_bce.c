@@ -9,10 +9,19 @@ static struct class *bce_class;
 
 struct apple_bce_device *global_bce;
 
+/* MSI vectors not used by the mailbox (0) or the default DMA interrupt (4).
+ * All of them are requested with the shared aux irq context so that CQ
+ * vector steering (bce_create_cq_on_vector) is observed no matter how the
+ * device interprets the memcfg vector field. */
+static const int bce_aux_dma_vectors[] = {1, 2, 3, 5, 6, 7};
+
+#define BCE_DMA_VECTOR 4
+
 static int bce_create_command_queues(struct apple_bce_device *bce);
 static void bce_free_command_queues(struct apple_bce_device *bce);
 static irqreturn_t bce_handle_mb_irq(int irq, void *dev);
-static irqreturn_t bce_handle_dma_irq(int irq, void *dev);
+static irqreturn_t bce_handle_dma_irq(int irq, void *data);
+static void bce_free_aux_irqs(struct apple_bce_device *bce);
 static int bce_fw_version_handshake(struct apple_bce_device *bce);
 static int bce_register_command_queue(struct apple_bce_device *bce, struct bce_queue_memcfg *cfg, int is_sq);
 
@@ -21,6 +30,7 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     struct apple_bce_device *bce = NULL;
     int status = 0;
     int nvec;
+    int i;
 
     pr_info("apple-bce: capturing our device\n");
 
@@ -73,10 +83,29 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     INIT_LIST_HEAD(&bce->cq_list);
     ida_init(&bce->queue_ida);
 
+    bce->nvec = nvec;
+    bce->dma_irq.dev = bce;
+    bce->dma_irq.aux = false;
+    mutex_init(&bce->dma_irq.lock);
+    bce->dma_irq_aux.dev = bce;
+    bce->dma_irq_aux.aux = true;
+    mutex_init(&bce->dma_irq_aux.lock);
+
     if ((status = pci_request_irq(dev, 0, bce_handle_mb_irq, NULL, dev, "bce_mbox")))
         goto fail;
-    if ((status = pci_request_irq(dev, 4, NULL, bce_handle_dma_irq, dev, "bce_dma")))
+    if ((status = pci_request_irq(dev, BCE_DMA_VECTOR, NULL, bce_handle_dma_irq, &bce->dma_irq, "bce_dma")))
         goto fail_interrupt_0;
+    for (i = 0; i < ARRAY_SIZE(bce_aux_dma_vectors); i++) {
+        if (bce_aux_dma_vectors[i] >= nvec)
+            continue;
+        if ((status = pci_request_irq(dev, bce_aux_dma_vectors[i], NULL, bce_handle_dma_irq,
+                &bce->dma_irq_aux, "bce_dma_aux%d", bce_aux_dma_vectors[i]))) {
+            while (i--)
+                if (bce_aux_dma_vectors[i] < nvec)
+                    pci_free_irq(dev, bce_aux_dma_vectors[i], &bce->dma_irq_aux);
+            goto fail_interrupt_4;
+        }
+    }
 
     if ((status = dma_set_mask_and_coherent(&dev->dev, DMA_BIT_MASK(37)))) {
         dev_warn(&dev->dev, "dma: Setting mask failed\n");
@@ -137,7 +166,9 @@ fail_dev0:
 #endif
     pci_dev_put(bce->pci0);
 fail_interrupt:
-    pci_free_irq(dev, 4, dev);
+    bce_free_aux_irqs(bce);
+fail_interrupt_4:
+    pci_free_irq(dev, BCE_DMA_VECTOR, &bce->dma_irq);
 fail_interrupt_0:
     pci_free_irq(dev, 0, dev);
 fail:
@@ -244,13 +275,22 @@ static irqreturn_t bce_handle_mb_irq(int irq, void *dev)
     return IRQ_HANDLED;
 }
 
-static irqreturn_t bce_handle_dma_irq(int irq, void *dev)
+static irqreturn_t bce_handle_dma_irq(int irq, void *data)
 {
-    struct apple_bce_device *bce = pci_get_drvdata(dev);
+    struct bce_dma_irq_ctx *ctx = data;
+    struct apple_bce_device *bce = ctx->dev;
     struct bce_queue_cq *cq;
     size_t ce = 0;
     int idx;
 
+    if (ctx->aux)
+        pr_info_once("apple-bce: DMA completion on an aux MSI vector (irq %d) — CQ vector steering works\n",
+                     irq);
+
+    /* The aux context is shared by several MSI vectors; their threaded
+     * handlers must not process the same CQs concurrently. Uncontended in
+     * practice: the device signals a given CQ on one vector. */
+    mutex_lock(&ctx->lock);
     /* SRCU (not the queues_lock mutex): completion handlers may sleep, and
      * queue creation/destruction must not serialize against completion
      * processing. Teardown unpublishes a queue and then synchronize_srcu()s
@@ -258,13 +298,42 @@ static irqreturn_t bce_handle_dma_irq(int irq, void *dev)
     idx = srcu_read_lock(&bce->queues_srcu);
     /* Two phases: harvest and acknowledge every CQ first, then run the
      * handlers — a slow completion handler must not delay acking the other
-     * queues towards the device. */
+     * queues towards the device. Each CQ is polled only by its owning
+     * context, keyed off the vector field it was registered with. */
     list_for_each_entry_rcu(cq, &bce->cq_list, node,
                             srcu_read_lock_held(&bce->queues_srcu))
-        ce = bce_poll_cq(bce, cq, ce);
-    bce_dispatch_sq_completions(bce, ce);
+        if ((cq->vector_or_cq != 0) == ctx->aux)
+            ce = bce_poll_cq(bce, cq, ce, ctx->sq_list);
+    bce_dispatch_sq_completions(bce, ce, ctx->sq_list);
     srcu_read_unlock(&bce->queues_srcu, idx);
+    mutex_unlock(&ctx->lock);
     return IRQ_HANDLED;
+}
+
+static void bce_free_aux_irqs(struct apple_bce_device *bce)
+{
+    int i;
+    for (i = 0; i < ARRAY_SIZE(bce_aux_dma_vectors); i++)
+        if (bce_aux_dma_vectors[i] < bce->nvec)
+            pci_free_irq(bce->pci, bce_aux_dma_vectors[i], &bce->dma_irq_aux);
+}
+
+static void bce_dma_irqs_disable(struct apple_bce_device *bce)
+{
+    int i;
+    disable_irq(pci_irq_vector(bce->pci, BCE_DMA_VECTOR));
+    for (i = 0; i < ARRAY_SIZE(bce_aux_dma_vectors); i++)
+        if (bce_aux_dma_vectors[i] < bce->nvec)
+            disable_irq(pci_irq_vector(bce->pci, bce_aux_dma_vectors[i]));
+}
+
+static void bce_dma_irqs_enable(struct apple_bce_device *bce)
+{
+    int i;
+    enable_irq(pci_irq_vector(bce->pci, BCE_DMA_VECTOR));
+    for (i = 0; i < ARRAY_SIZE(bce_aux_dma_vectors); i++)
+        if (bce_aux_dma_vectors[i] < bce->nvec)
+            enable_irq(pci_irq_vector(bce->pci, bce_aux_dma_vectors[i]));
 }
 
 static int bce_fw_version_handshake(struct apple_bce_device *bce)
@@ -321,7 +390,8 @@ static void apple_bce_remove(struct pci_dev *dev)
 #endif
     pci_dev_put(bce->pci0);
     pci_free_irq(dev, 0, dev);
-    pci_free_irq(dev, 4, dev);
+    pci_free_irq(dev, BCE_DMA_VECTOR, &bce->dma_irq);
+    bce_free_aux_irqs(bce);
     bce_free_command_queues(bce);
     pci_iounmap(dev, bce->reg_mem_mb);
     pci_iounmap(dev, bce->reg_mem_dma);
@@ -429,10 +499,10 @@ static int apple_bce_suspend(struct device *dev)
         return status;
     }
 
-    /* Disable DMA IRQ after T2 is asleep. On resume, PCI core powers the
-     * device back on before apple_bce_resume() runs — the disabled IRQ
-     * prevents stale completion processing during that transition window. */
-    disable_irq(pci_irq_vector(bce->pci, 4));
+    /* Disable DMA IRQs after T2 is asleep. On resume, PCI core powers the
+     * device back on before apple_bce_resume() runs — the disabled IRQs
+     * prevent stale completion processing during that transition window. */
+    bce_dma_irqs_disable(bce);
 
     return 0;
 }
@@ -460,7 +530,7 @@ static int apple_bce_resume(struct device *dev)
     }
     if (vid != PCI_VENDOR_ID_APPLE) {
         pr_err("apple-bce: resume: T2 not accessible after timeout (vid=0x%04x)\n", vid);
-        enable_irq(pci_irq_vector(bce->pci, 4));
+        bce_dma_irqs_enable(bce);
         return -ENODEV;
     }
 
@@ -468,14 +538,14 @@ static int apple_bce_resume(struct device *dev)
     pci_set_master(bce->pci0);
 
     if ((status = bce_restore_state_and_wake(bce))) {
-        enable_irq(pci_irq_vector(bce->pci, 4));
+        bce_dma_irqs_enable(bce);
         return status;
     }
 
     bce_timestamp_start(&bce->timestamp, false);
 
-    /* Re-enable DMA IRQ now that T2 state is restored and bus mastering is on. */
-    enable_irq(pci_irq_vector(bce->pci, 4));
+    /* Re-enable DMA IRQs now that T2 state is restored and bus mastering is on. */
+    bce_dma_irqs_enable(bce);
 
     return 0;
 }
