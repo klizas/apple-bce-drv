@@ -1,5 +1,6 @@
 #include "pcm.h"
 #include "audio.h"
+#include <linux/dma-mapping.h>
 
 static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
 {
@@ -309,14 +310,22 @@ static snd_pcm_uframes_t aaudio_pcm_pointer(struct snd_pcm_substream *substream)
 static int aaudio_pcm_mmap(struct snd_pcm_substream *substream,
                            struct vm_area_struct *vma)
 {
+    struct aaudio_subdevice *sdev = snd_pcm_substream_chip(substream);
+    struct aaudio_stream *stream = aaudio_pcm_stream(substream);
     struct snd_pcm_runtime *runtime = substream->runtime;
 
-    /* Use write-combining for playback: PipeWire's stores are batched into
-     * efficient PCI transactions instead of individual uncached writes. */
-    if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-        vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-    else
-        vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+    /* Host-allocated (capture) buffers are coherent system RAM: map them
+     * cacheable via the DMA API, which also translates correctly when the
+     * dma_addr is an IOMMU IOVA rather than a physical address. */
+    if (stream->host_allocated)
+        return dma_mmap_coherent(&sdev->a->pci->dev, vma,
+                stream->buffers[0].ptr, stream->buffers[0].dma_addr,
+                stream->buffers[0].size);
+
+    /* Use write-combining for playback (T2 BAR MMIO): PipeWire's stores are
+     * batched into efficient PCI transactions instead of individual uncached
+     * writes. */
+    vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
     return vm_iomap_memory(vma, runtime->dma_addr, runtime->dma_bytes);
 }
 
