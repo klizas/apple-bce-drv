@@ -254,10 +254,8 @@ static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
         case SNDRV_PCM_TRIGGER_START:
             aaudio_pcm_start(substream);
             stream->started = 1;
-            if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
-                stream->period_next = jiffies + stream->period_jiffies;
-                schedule_delayed_work(&stream->period_work, stream->period_jiffies);
-            }
+            stream->period_next = jiffies + stream->period_jiffies;
+            schedule_delayed_work(&stream->period_work, stream->period_jiffies);
             break;
         case SNDRV_PCM_TRIGGER_STOP:
             aaudio_cmd_stop_io(sdev->a, sdev->dev_id);

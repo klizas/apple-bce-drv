@@ -70,9 +70,9 @@ struct aaudio_stream {
     snd_pcm_sframes_t frame_min;
     int started;
 
-    /* The T2 only signals once per pass over the whole ring, so capture
-     * substreams get period wakeups from this self-rearming work instead;
-     * the pointer callback interpolates the position between signals. */
+    /* The T2 only signals once per pass over the whole ring, so period
+     * wakeups come from this self-rearming work instead; the pointer
+     * callback interpolates the position between signals. */
     struct delayed_work period_work;
     struct snd_pcm_substream *pcm_substream;
     unsigned long period_jiffies;
