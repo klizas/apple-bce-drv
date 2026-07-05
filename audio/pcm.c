@@ -1,6 +1,7 @@
 #include "pcm.h"
 #include "audio.h"
 #include <linux/dma-mapping.h>
+#include <linux/version.h>
 
 static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
 {
@@ -122,22 +123,22 @@ static struct aaudio_stream *aaudio_pcm_stream(struct snd_pcm_substream *substre
 
 static void aaudio_pcm_period_work(struct work_struct *ws)
 {
-    struct aaudio_stream *stream = container_of(to_delayed_work(ws),
-            struct aaudio_stream, period_work);
-    long delay;
+    struct aaudio_stream *stream = container_of(ws, struct aaudio_stream, period_work);
 
-    if (!stream->started)
+    if (!READ_ONCE(stream->started))
         return;
     snd_pcm_period_elapsed(stream->pcm_substream);
-    if (!stream->started)
-        return;
-    stream->period_next += stream->period_jiffies;
-    delay = (long) (stream->period_next - jiffies);
-    if (delay < 0) {
-        stream->period_next = jiffies;
-        delay = 0;
-    }
-    schedule_delayed_work(&stream->period_work, delay);
+}
+
+static enum hrtimer_restart aaudio_pcm_period_timer(struct hrtimer *timer)
+{
+    struct aaudio_stream *stream = container_of(timer, struct aaudio_stream, period_timer);
+
+    if (!READ_ONCE(stream->started))
+        return HRTIMER_NORESTART;
+    schedule_work(&stream->period_work);
+    hrtimer_forward_now(timer, ns_to_ktime(stream->period_time_ns));
+    return HRTIMER_RESTART;
 }
 
 static int aaudio_pcm_open(struct snd_pcm_substream *substream)
@@ -152,7 +153,13 @@ static int aaudio_pcm_open(struct snd_pcm_substream *substream)
     substream->runtime->hw = *stream->alsa_hw_desc;
 
     stream->pcm_substream = substream;
-    INIT_DELAYED_WORK(&stream->period_work, aaudio_pcm_period_work);
+    INIT_WORK(&stream->period_work, aaudio_pcm_period_work);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,13,0)
+    hrtimer_init(&stream->period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+    stream->period_timer.function = aaudio_pcm_period_timer;
+#else
+    hrtimer_setup(&stream->period_timer, aaudio_pcm_period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#endif
 
     /* Period size must be a multiple of the hardware packet size */
     snd_pcm_hw_constraint_step(substream->runtime, 0,
@@ -166,7 +173,8 @@ static int aaudio_pcm_close(struct snd_pcm_substream *substream)
 {
     struct aaudio_stream *stream = aaudio_pcm_stream(substream);
     pr_debug("aaudio_pcm_close\n");
-    cancel_delayed_work_sync(&stream->period_work);
+    hrtimer_cancel(&stream->period_timer);
+    cancel_work_sync(&stream->period_work);
     return 0;
 }
 
@@ -180,9 +188,8 @@ static int aaudio_pcm_prepare(struct snd_pcm_substream *substream)
     substream->runtime->delay = stream->latency;
     stream->buffer_time_ns = (s64) NSEC_PER_SEC * substream->runtime->buffer_size /
                              substream->runtime->rate;
-    stream->period_jiffies = max_t(unsigned long, 1,
-            usecs_to_jiffies(div_u64((u64) substream->runtime->period_size * USEC_PER_SEC,
-                                     substream->runtime->rate)));
+    stream->period_time_ns = div_u64((u64) substream->runtime->period_size * NSEC_PER_SEC,
+                                     substream->runtime->rate);
     return 0;
 }
 
@@ -255,17 +262,17 @@ static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
         case SNDRV_PCM_TRIGGER_START:
             aaudio_pcm_start(substream);
             stream->started = 1;
-            stream->period_next = jiffies + stream->period_jiffies;
-            schedule_delayed_work(&stream->period_work, stream->period_jiffies);
+            hrtimer_start(&stream->period_timer, ns_to_ktime(stream->period_time_ns),
+                          HRTIMER_MODE_REL);
             break;
         case SNDRV_PCM_TRIGGER_STOP:
             aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
             stream->started = 0;
-            cancel_delayed_work(&stream->period_work);
+            hrtimer_cancel(&stream->period_timer);
             break;
         case SNDRV_PCM_TRIGGER_SUSPEND:
             /* IO already stopped by aaudio_suspend */
-            cancel_delayed_work(&stream->period_work);
+            hrtimer_cancel(&stream->period_timer);
             break;
         default:
             return -EINVAL;

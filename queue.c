@@ -103,9 +103,9 @@ size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t
 void bce_dispatch_sq_completions(struct apple_bce_device *dev, size_t ce)
 {
     struct bce_queue_sq *sq;
-    while (ce) {
-        --ce;
-        sq = dev->int_sq_list[ce];
+    size_t i;
+    for (i = 0; i < ce; ++i) {
+        sq = dev->int_sq_list[i];
         sq->completion(sq);
         sq->has_pending_completions = false;
     }

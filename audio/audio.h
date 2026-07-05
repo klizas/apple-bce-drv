@@ -2,6 +2,7 @@
 #define AAUDIO_H
 
 #include <linux/types.h>
+#include <linux/hrtimer.h>
 #include <sound/pcm.h>
 #include "../apple_bce.h"
 #include "protocol_bce.h"
@@ -71,12 +72,14 @@ struct aaudio_stream {
     int started;
 
     /* The T2 only signals once per pass over the whole ring, so period
-     * wakeups come from this self-rearming work instead; the pointer
-     * callback interpolates the position between signals. */
-    struct delayed_work period_work;
+     * wakeups come from this self-rearming hrtimer instead; the pointer
+     * callback interpolates the position between signals. The timer only
+     * queues period_work — the PCM is nonatomic, so
+     * snd_pcm_period_elapsed may not be called from timer context. */
+    struct hrtimer period_timer;
+    struct work_struct period_work;
     struct snd_pcm_substream *pcm_substream;
-    unsigned long period_jiffies;
-    unsigned long period_next;
+    u64 period_time_ns;
 };
 struct aaudio_subdevice {
     struct aaudio_device *a;

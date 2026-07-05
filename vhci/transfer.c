@@ -107,7 +107,12 @@ static void bce_vhci_transfer_queue_defer_event(struct bce_vhci_transfer_queue *
     struct bce_vhci_list_message *lm;
     lm = kmalloc(sizeof(struct bce_vhci_list_message), GFP_ATOMIC);
     if (!lm) {
-        pr_err("bce-vhci: [%02x] failed to allocate deferred event, dropping\n", q->endp_addr);
+        /* Dropping the event silently would desync the endpoint state
+         * machine (an URB would wait forever for its TRANSFER_REQUEST);
+         * go through the stall/reset path instead. */
+        pr_err("bce-vhci: [%02x] failed to allocate deferred event, resetting endpoint\n", q->endp_addr);
+        q->stalled = true;
+        bce_vhci_transfer_queue_request_reset(q);
         return;
     }
     INIT_LIST_HEAD(&lm->list);
