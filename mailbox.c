@@ -132,25 +132,37 @@ void bce_timestamp_stop(struct bce_timestamp *ts)
     iowrite32((u32) -1, regb);
 }
 
+/* The T2 free-runs its timestamp clock at ~25ppm between syncs, so 10s
+ * bounds the base drift to 0.25ms — negligible against the ~12ms pipeline
+ * offset. bce_timestamp_start still arms the first sync 150ms after
+ * boot/resume. 0 disables the sync writes (timer keeps polling at 1s so
+ * the value can be raised again at runtime). */
+static int bce_timestamp_interval_ms = 10000;
+module_param_named(timestamp_interval_ms, bce_timestamp_interval_ms, int, 0644);
+
 static void bc_send_timestamp(struct timer_list *tl)
 {
     struct bce_timestamp *ts;
     unsigned long flags;
     u32 __iomem *regb;
     ktime_t bt;
+    int interval = READ_ONCE(bce_timestamp_interval_ms);
 
     ts = container_of(tl, struct bce_timestamp, timer);
     regb = (u32*) ((u8*) ts->reg + REG_TIMESTAMP_BASE);
     local_irq_save(flags);
-    ioread32(regb + 2);
-    mb();
-    bt = ktime_get_boottime();
-    iowrite32((u32) bt, regb + 2);
-    iowrite32((u32) (bt >> 32), regb);
+    if (interval > 0) {
+        ioread32(regb + 2);
+        mb();
+        bt = ktime_get_boottime();
+        iowrite32((u32) bt, regb + 2);
+        iowrite32((u32) (bt >> 32), regb);
+    }
 
     spin_lock(&ts->stop_sl);
     if (!ts->stopped)
-        mod_timer(&ts->timer, jiffies + msecs_to_jiffies(150));
+        mod_timer(&ts->timer, jiffies +
+                msecs_to_jiffies(interval > 0 ? interval : 1000));
     spin_unlock(&ts->stop_sl);
     local_irq_restore(flags);
 }
