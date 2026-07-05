@@ -166,6 +166,14 @@ static int aaudio_pcm_open(struct snd_pcm_substream *substream)
             SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
             stream->desc.frames_per_packet);
 
+    /* The T2 always traverses the whole ring; there is no way to tell it
+     * about a smaller buffer. A sub-ring ALSA buffer would leave ring
+     * regions the application never writes and break the once-per-ring
+     * timestamp interpolation in the pointer callback. */
+    snd_pcm_hw_constraint_single(substream->runtime,
+            SNDRV_PCM_HW_PARAM_BUFFER_BYTES,
+            stream->buffers[0].size);
+
     return 0;
 }
 
