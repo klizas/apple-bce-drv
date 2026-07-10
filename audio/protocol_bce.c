@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "aaudio: " fmt
+
 #include "protocol_bce.h"
 
 #include "audio.h"
@@ -98,7 +100,7 @@ void __aaudio_send(struct aaudio_bce *b, struct aaudio_send_ctx *ctx)
 {
     struct bce_qe_submission *s = bce_next_submission(b->qout.sq);
 #ifdef DEBUG
-    pr_debug("aaudio: Sending command data\n");
+    pr_debug("Sending command data\n");
     print_hex_dump(KERN_DEBUG, "aaudio:OUT ", DUMP_PREFIX_NONE, 32, 1, ctx->msg.data, ctx->msg.size, true);
 #endif
     bce_set_submission_single(s, b->qout.dma_addr + (dma_addr_t) (ctx->msg.data - b->qout.data), ctx->msg.size);
@@ -170,7 +172,7 @@ static void aaudio_handle_reply(struct aaudio_bce *b, struct aaudio_msg *reply)
 static void aaudio_bce_out_queue_completion(struct bce_queue_sq *sq)
 {
     while (bce_next_completion(sq)) {
-        //pr_info("aaudio: Send confirmed\n");
+        //pr_info("Send confirmed\n");
         bce_notify_submission_complete(sq);
     }
 }
@@ -189,7 +191,7 @@ static void aaudio_bce_in_queue_completion(struct bce_queue_sq *sq)
         msg.data = (u8 *) q->data + q->data_head * q->el_size;
         msg.size = c->data_size;
 #ifdef DEBUG
-        pr_debug("aaudio: Received command data %llx\n", c->data_size);
+        pr_debug("Received command data %llx\n", c->data_size);
         print_hex_dump(KERN_DEBUG, "aaudio:IN ", DUMP_PREFIX_NONE, 32, 1, msg.data, min(msg.size, 128UL), true);
 #endif
         aaudio_bce_in_queue_handle_msg(dev, &msg);
@@ -206,7 +208,7 @@ static void aaudio_bce_in_queue_handle_msg(struct aaudio_device *a, struct aaudi
 {
     struct aaudio_msg_header *header = (struct aaudio_msg_header *) msg->data;
     if (msg->size < sizeof(struct aaudio_msg_header)) {
-        pr_err("aaudio: Msg size smaller than header (%lx)", msg->size);
+        pr_err("Msg size smaller than header (%zx)\n", msg->size);
         return;
     }
     if (header->type == AAUDIO_MSG_TYPE_RESPONSE) {
@@ -223,7 +225,7 @@ void aaudio_bce_in_queue_submit_pending(struct aaudio_bce_queue *q, size_t count
     struct bce_qe_submission *s;
     while (count--) {
         if (bce_reserve_submission(q->sq, NULL)) {
-            pr_err("aaudio: Failed to reserve an event queue submission\n");
+            pr_err("Failed to reserve an event queue submission\n");
             break;
         }
         s = bce_next_submission(q->sq);

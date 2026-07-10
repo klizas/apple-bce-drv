@@ -66,7 +66,7 @@ struct bce_queue_cmdq_result_el {
 };
 struct bce_queue_cmdq {
     struct bce_queue_sq *sq;
-    struct spinlock lck;
+    spinlock_t lck;
     struct bce_queue_cmdq_result_el **tres;
 };
 
@@ -169,9 +169,9 @@ void bce_set_submission_single(struct bce_qe_submission *element, dma_addr_t add
 struct bce_queue_cmdq *bce_alloc_cmdq(struct apple_bce_device *dev, int qid, u32 el_count);
 void bce_free_cmdq(struct apple_bce_device *dev, struct bce_queue_cmdq *cmdq);
 
-u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, u16 flags);
-u32 bce_cmd_unregister_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
-u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
+int bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, u16 flags);
+int bce_cmd_unregister_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
+int bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid);
 
 
 /* User API - Creates and registers the queue */

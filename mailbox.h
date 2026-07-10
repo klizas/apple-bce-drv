@@ -43,7 +43,7 @@ int bce_mailbox_handle_interrupt(struct bce_mailbox *mb);
 struct bce_timestamp {
     void __iomem *reg;
     struct timer_list timer;
-    struct spinlock stop_sl;
+    spinlock_t stop_sl;
     bool stopped;
 };
 

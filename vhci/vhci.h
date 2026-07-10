@@ -17,14 +17,14 @@ struct bce_vhci {
     dev_t vdevt;
     struct device *vdev;
     struct usb_hcd *hcd;
-    struct spinlock hcd_spinlock;
+    spinlock_t hcd_spinlock;
     struct bce_vhci_message_queue msg_commands;
     struct bce_vhci_message_queue msg_system;
     struct bce_vhci_message_queue msg_isochronous;
     struct bce_vhci_message_queue msg_interrupt;
     struct bce_vhci_message_queue msg_asynchronous;
-    struct spinlock msg_asynchronous_lock;
-    struct spinlock msg_isochronous_lock;
+    spinlock_t msg_asynchronous_lock;
+    spinlock_t msg_isochronous_lock;
     struct bce_vhci_command_queue cq;
     struct bce_queue_cq *ev_cq;
     struct bce_vhci_event_queue ev_commands;

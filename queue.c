@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "apple-bce: " fmt
+
 #include "queue.h"
 #include "apple_bce.h"
 #include <linux/version.h>
@@ -88,7 +90,7 @@ size_t bce_poll_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq, size_t
         if (!(e->flags & BCE_COMPLETION_FLAG_PENDING))
             break;
         dma_rmb();
-        // pr_info("apple-bce: compl: %i: %i %llx %llx", e->qid, e->status, e->data_size, e->result);
+        // pr_info("compl: %i: %i %llx %llx", e->qid, e->status, e->data_size, e->result);
         bce_handle_cq_completion(dev, e, &ce);
         e->flags = 0;
         cq->index = (cq->index + 1) % cq->el_count;
@@ -127,7 +129,7 @@ struct bce_queue_sq *bce_alloc_sq(struct apple_bce_device *dev, int qid, u32 el_
                                  &q->dma_handle, GFP_KERNEL);
     q->completion = compl;
     q->userdata = userdata;
-    q->completion_data = kzalloc(sizeof(struct bce_sq_completion_data) * el_count, GFP_KERNEL);
+    q->completion_data = kcalloc(el_count, sizeof(struct bce_sq_completion_data), GFP_KERNEL);
     q->reg_mem_dma = dev->reg_mem_dma;
     atomic_set(&q->available_commands, el_count - 1);
     init_waitqueue_head(&q->available_command_wq);
@@ -221,7 +223,7 @@ struct bce_queue_cmdq *bce_alloc_cmdq(struct apple_bce_device *dev, int qid, u32
         return NULL;
     }
     spin_lock_init(&q->lck);
-    q->tres = kzalloc(sizeof(struct bce_queue_cmdq_result_el*) * el_count, GFP_KERNEL);
+    q->tres = kcalloc(el_count, sizeof(struct bce_queue_cmdq_result_el *), GFP_KERNEL);
     if (!q->tres) {
         bce_free_sq(dev, q->sq);
         kfree(q);
@@ -251,7 +253,7 @@ void bce_cmdq_completion(struct bce_queue_sq *q)
             el->status = result->status;
             complete(&el->cmpl);
         } else {
-            pr_debug("apple-bce: discarding late command completion\n");
+            pr_debug("discarding late command completion\n");
         }
         cmdq->tres[cmdq->sq->head] = NULL;
         bce_notify_submission_complete(q);
@@ -260,6 +262,7 @@ void bce_cmdq_completion(struct bce_queue_sq *q)
 }
 
 static __always_inline void *bce_cmd_start(struct bce_queue_cmdq *cmdq, struct bce_queue_cmdq_result_el *res)
+        __acquires(&cmdq->lck)
 {
     void *ret;
     unsigned long timeout;
@@ -277,12 +280,13 @@ static __always_inline void *bce_cmd_start(struct bce_queue_cmdq *cmdq, struct b
 }
 
 static __always_inline int bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bce_queue_cmdq_result_el *res)
+        __releases(&cmdq->lck)
 {
     bce_submit_to_device(cmdq->sq);
     spin_unlock(&cmdq->lck);
 
     if (!wait_for_completion_timeout(&res->cmpl, msecs_to_jiffies(5000))) {
-        pr_err("apple-bce: command queue timeout (slot %u)\n", res->slot);
+        pr_err("command queue timeout (slot %u)\n", res->slot);
         spin_lock(&cmdq->lck);
         cmdq->tres[res->slot] = NULL;
         spin_unlock(&cmdq->lck);
@@ -291,12 +295,13 @@ static __always_inline int bce_cmd_finish(struct bce_queue_cmdq *cmdq, struct bc
     return 0;
 }
 
-u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, u16 flags)
+int bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg *cfg, const char *name, u16 flags)
 {
+    int status;
     struct bce_queue_cmdq_result_el res;
     struct bce_cmdq_register_memory_queue_cmd *cmd = bce_cmd_start(cmdq, &res);
     if (!cmd)
-        return (u32) -1;
+        return -ETIMEDOUT;
     cmd->cmd = BCE_CMD_REGISTER_MEMORY_QUEUE;
     cmd->flags = flags;
     cmd->qid = cfg->qid;
@@ -312,37 +317,39 @@ u32 bce_cmd_register_queue(struct bce_queue_cmdq *cmdq, struct bce_queue_memcfg 
     cmd->addr = cfg->addr;
     cmd->length = cfg->length;
 
-    if (bce_cmd_finish(cmdq, &res))
-        return (u32) -1;
-    return res.status;
+    if ((status = bce_cmd_finish(cmdq, &res)))
+        return status;
+    return res.status ? -EIO : 0;
 }
 
-u32 bce_cmd_unregister_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
+int bce_cmd_unregister_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
 {
+    int status;
     struct bce_queue_cmdq_result_el res;
     struct bce_cmdq_simple_memory_queue_cmd *cmd = bce_cmd_start(cmdq, &res);
     if (!cmd)
-        return (u32) -1;
+        return -ETIMEDOUT;
     cmd->cmd = BCE_CMD_UNREGISTER_MEMORY_QUEUE;
     cmd->flags = 0;
     cmd->qid = qid;
-    if (bce_cmd_finish(cmdq, &res))
-        return (u32) -1;
-    return res.status;
+    if ((status = bce_cmd_finish(cmdq, &res)))
+        return status;
+    return res.status ? -EIO : 0;
 }
 
-u32 bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
+int bce_cmd_flush_memory_queue(struct bce_queue_cmdq *cmdq, u16 qid)
 {
+    int status;
     struct bce_queue_cmdq_result_el res;
     struct bce_cmdq_simple_memory_queue_cmd *cmd = bce_cmd_start(cmdq, &res);
     if (!cmd)
-        return (u32) -1;
+        return -ETIMEDOUT;
     cmd->cmd = BCE_CMD_FLUSH_MEMORY_QUEUE;
     cmd->flags = 0;
     cmd->qid = qid;
-    if (bce_cmd_finish(cmdq, &res))
-        return (u32) -1;
-    return res.status;
+    if ((status = bce_cmd_finish(cmdq, &res)))
+        return status;
+    return res.status ? -EIO : 0;
 }
 EXPORT_SYMBOL_GPL(bce_cmd_flush_memory_queue);
 
@@ -379,7 +386,7 @@ struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)
     }
     bce_get_cq_memcfg(cq, &cfg);
     if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, NULL, 0) != 0) {
-        pr_err("apple-bce: CQ registration failed (%i)", qid);
+        pr_err("CQ registration failed (%i)", qid);
         bce_free_cq(dev, cq);
         bce_qid_free(dev, qid);
         return NULL;
@@ -422,7 +429,7 @@ struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, stru
     }
     bce_get_sq_memcfg(sq, cq, &cfg);
     if (bce_cmd_register_queue(dev->cmd_cmdq, &cfg, name, flags) != 0) {
-        pr_err("apple-bce: SQ registration failed (%i)", qid);
+        pr_err("SQ registration failed (%i)", qid);
         bce_free_sq(dev, sq);
         bce_qid_free(dev, qid);
         return NULL;
@@ -438,7 +445,7 @@ EXPORT_SYMBOL_GPL(bce_create_sq_with_flags);
 void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq)
 {
     if (!dev->is_being_removed && bce_cmd_unregister_memory_queue(dev->cmd_cmdq, (u16) cq->qid))
-        pr_err("apple-bce: CQ unregister failed");
+        pr_err("CQ unregister failed");
     mutex_lock(&dev->queues_lock);
     dev->queues[cq->qid] = NULL;
     list_del_rcu(&cq->node);
@@ -454,7 +461,7 @@ EXPORT_SYMBOL_GPL(bce_destroy_cq);
 void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq)
 {
     if (!dev->is_being_removed && bce_cmd_unregister_memory_queue(dev->cmd_cmdq, (u16) sq->qid))
-        pr_err("apple-bce: SQ unregister failed");
+        pr_err("SQ unregister failed");
     mutex_lock(&dev->queues_lock);
     dev->queues[sq->qid] = NULL;
     mutex_unlock(&dev->queues_lock);

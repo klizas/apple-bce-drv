@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "aaudio: " fmt
+
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/module.h>
@@ -29,7 +31,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     int status = 0;
     u32 cfg;
 
-    pr_info("aaudio: capturing our device\n");
+    pr_info("capturing our device\n");
 
     if (pci_enable_device(dev))
         return -ENODEV;
@@ -49,14 +51,14 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     aaudio->bce = global_bce;
     if (!aaudio->bce) {
-        dev_warn(&dev->dev, "aaudio: No BCE available\n");
+        dev_warn(&dev->dev, "No BCE available\n");
         status = -EINVAL;
         goto fail;
     }
     /* Force this device to unbind before apple-bce so global_bce cannot
      * dangle while aaudio is bound. */
     if (!device_link_add(&dev->dev, &aaudio->bce->pci->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
-        dev_warn(&dev->dev, "aaudio: failed to create device link to apple-bce\n");
+        dev_warn(&dev->dev, "failed to create device link to apple-bce\n");
 
     aaudio->pci = dev;
     pci_set_drvdata(dev, aaudio);
@@ -72,11 +74,11 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     /* Init: set an unknown flag in the bitset */
     if (pci_read_config_dword(dev, 4, &cfg))
-        dev_warn(&dev->dev, "aaudio: pci_read_config_dword fail\n");
+        dev_warn(&dev->dev, "pci_read_config_dword fail\n");
     if (pci_write_config_dword(dev, 4, cfg | 6u))
-        dev_warn(&dev->dev, "aaudio: pci_write_config_dword fail\n");
+        dev_warn(&dev->dev, "pci_write_config_dword fail\n");
 
-    dev_info(aaudio->dev, "aaudio: bs len = %llx\n", pci_resource_len(dev, 0));
+    dev_info(aaudio->dev, "bs len = %llx\n", pci_resource_len(dev, 0));
     aaudio->reg_mem_bs_dma = pci_resource_start(dev, 0);
     aaudio->reg_mem_bs = pci_iomap_wc(dev, 0, 0);
     aaudio->reg_mem_cfg = pci_iomap(dev, 4, 0);
@@ -84,17 +86,17 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     aaudio->reg_mem_gpr = (u32 __iomem *) ((u8 __iomem *) aaudio->reg_mem_cfg + 0xC000);
 
     if (IS_ERR_OR_NULL(aaudio->reg_mem_bs) || IS_ERR_OR_NULL(aaudio->reg_mem_cfg)) {
-        dev_warn(&dev->dev, "aaudio: Failed to pci_iomap required regions\n");
+        dev_warn(&dev->dev, "Failed to pci_iomap required regions\n");
         goto fail;
     }
 
     if (aaudio_bce_init(aaudio)) {
-        dev_warn(&dev->dev, "aaudio: Failed to init BCE command transport\n");
+        dev_warn(&dev->dev, "Failed to init BCE command transport\n");
         goto fail_bce;
     }
 
     if (snd_card_new(aaudio->dev, aaudio_alsa_index, aaudio_alsa_id, THIS_MODULE, 0, &aaudio->card)) {
-        dev_err(&dev->dev, "aaudio: Failed to create ALSA card\n");
+        dev_err(&dev->dev, "Failed to create ALSA card\n");
         goto fail_bce;
     }
 
@@ -105,12 +107,12 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     aaudio->next_alsa_id = 100;
 
     if (aaudio_init_cmd(aaudio)) {
-        dev_err(&dev->dev, "aaudio: Failed to initialize over BCE\n");
+        dev_err(&dev->dev, "Failed to initialize over BCE\n");
         goto fail_snd;
     }
 
     if (aaudio_init_bs(aaudio)) {
-        dev_err(&dev->dev, "aaudio: Failed to initialize BufferStruct\n");
+        dev_err(&dev->dev, "Failed to initialize BufferStruct\n");
         goto fail_snd;
     }
 
@@ -120,7 +122,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     }
 
     if (snd_card_register(aaudio->card)) {
-        dev_err(&dev->dev, "aaudio: Failed to register ALSA sound device\n");
+        dev_err(&dev->dev, "Failed to register ALSA sound device\n");
         goto fail_snd;
     }
 
@@ -398,8 +400,7 @@ static void aaudio_free_dev(struct aaudio_subdevice *sdev)
     size_t i;
     cancel_work_sync(&sdev->ts_work);
     for (i = 0; i < sdev->in_stream_cnt; i++) {
-        if (sdev->in_streams[i].alsa_hw_desc)
-            kfree(sdev->in_streams[i].alsa_hw_desc);
+        kfree(sdev->in_streams[i].alsa_hw_desc);
         if (sdev->in_streams[i].buffers) {
             if (sdev->in_streams[i].host_allocated)
                 dma_free_coherent(&sdev->a->pci->dev,
@@ -410,10 +411,8 @@ static void aaudio_free_dev(struct aaudio_subdevice *sdev)
         }
     }
     for (i = 0; i < sdev->out_stream_cnt; i++) {
-        if (sdev->out_streams[i].alsa_hw_desc)
-            kfree(sdev->out_streams[i].alsa_hw_desc);
-        if (sdev->out_streams[i].buffers)
-            kfree(sdev->out_streams[i].buffers);
+        kfree(sdev->out_streams[i].alsa_hw_desc);
+        kfree(sdev->out_streams[i].buffers);
     }
     kfree(sdev);
 }
@@ -452,35 +451,35 @@ static int aaudio_init_bs(struct aaudio_device *a)
 
     ver = ioread32(&a->reg_mem_gpr[0]);
     if (ver < 3) {
-        dev_err(a->dev, "aaudio: Bad GPR version (%u)", ver);
+        dev_err(a->dev, "Bad GPR version (%u)\n", ver);
         return -EINVAL;
     }
     sig = ioread32(&a->reg_mem_gpr[1]);
     if (sig != AAUDIO_SIG) {
-        dev_err(a->dev, "aaudio: Bad GPR sig (%x)", sig);
+        dev_err(a->dev, "Bad GPR sig (%x)\n", sig);
         return -EINVAL;
     }
     bs_base = ioread32(&a->reg_mem_gpr[2]);
-    a->bs = (struct aaudio_buffer_struct *) ((u8 *) a->reg_mem_bs + bs_base);
+    a->bs = (__force struct aaudio_buffer_struct *) ((u8 __iomem *) a->reg_mem_bs + bs_base);
     if (a->bs->signature != AAUDIO_SIG) {
-        dev_err(a->dev, "aaudio: Bad BufferStruct sig (%x)", a->bs->signature);
+        dev_err(a->dev, "Bad BufferStruct sig (%x)\n", a->bs->signature);
         return -EINVAL;
     }
-    dev_info(a->dev, "aaudio: BufferStruct ver = %i\n", a->bs->version);
-    dev_info(a->dev, "aaudio: Num devices = %i\n", a->bs->num_devices);
+    dev_info(a->dev, "BufferStruct ver = %i\n", a->bs->version);
+    dev_info(a->dev, "Num devices = %i\n", a->bs->num_devices);
     for (i = 0; i < a->bs->num_devices && i < ARRAY_SIZE(a->bs->devices); i++) {
         dev = &a->bs->devices[i];
-        dev_info(a->dev, "aaudio: Device %i %s\n", i, dev->name);
+        dev_info(a->dev, "Device %i %s\n", i, dev->name);
 
         sdev = aaudio_find_dev_by_uid(a, dev->name);
         if (!sdev) {
-            dev_err(a->dev, "aaudio: Subdevice not found for BufferStruct device %s\n", dev->name);
+            dev_err(a->dev, "Subdevice not found for BufferStruct device %s\n", dev->name);
             continue;
         }
         sdev->buf_id = (u8) i;
         dev->num_input_streams = 0;
         for (j = 0; j < dev->num_output_streams; j++) {
-            dev_info(a->dev, "aaudio: Device %i Stream %i: Output; Buffer Count = %i\n", i, j,
+            dev_info(a->dev, "Device %i Stream %i: Output; Buffer Count = %i\n", i, j,
                      dev->output_streams[j].num_buffers);
             if (j < sdev->out_stream_cnt)
                 aaudio_init_bs_stream(a, &sdev->out_streams[j], &dev->output_streams[j]);
@@ -491,11 +490,11 @@ static int aaudio_init_bs(struct aaudio_device *a)
         if (sdev->buf_id != AAUDIO_BUFFER_ID_NONE)
             continue;
         if (i >= ARRAY_SIZE(a->bs->devices)) {
-            dev_warn(a->dev, "aaudio: Too many devices, skipping %s\n", sdev->uid);
+            dev_warn(a->dev, "Too many devices, skipping %s\n", sdev->uid);
             break;
         }
         sdev->buf_id = i;
-        dev_info(a->dev, "aaudio: Created device %i %s\n", i, sdev->uid);
+        dev_info(a->dev, "Created device %i %s\n", i, sdev->uid);
         strscpy(a->bs->devices[i].name, sdev->uid, sizeof(a->bs->devices[i].name));
         a->bs->devices[i].num_input_streams = 0;
         a->bs->devices[i].num_output_streams = 0;
@@ -507,13 +506,13 @@ static int aaudio_init_bs(struct aaudio_device *a)
         if (sdev->buf_id == AAUDIO_BUFFER_ID_NONE)
             continue;
         if (sdev->in_stream_cnt == 1) {
-            dev_info(a->dev, "aaudio: Device %i Host Stream; Input\n", sdev->buf_id);
+            dev_info(a->dev, "Device %i Host Stream; Input\n", sdev->buf_id);
             aaudio_init_bs_stream_host(a, &sdev->in_streams[0], &a->bs->devices[sdev->buf_id].input_streams[0]);
             a->bs->devices[sdev->buf_id].num_input_streams = 1;
             wmb();
 
             if (aaudio_cmd_set_input_stream_address_ranges(a, sdev->dev_id)) {
-                dev_err(a->dev, "aaudio: Failed to set input stream address ranges\n");
+                dev_err(a->dev, "Failed to set input stream address ranges\n");
             }
         }
     }
@@ -697,7 +696,7 @@ void aaudio_handle_prop_change(struct aaudio_device *a, struct aaudio_msg *msg)
 #define aaudio_send_cmd_response(a, sctx, msg, fn, ...) \
     do { \
         if (aaudio_send_with_tag(a, sctx, ((struct aaudio_msg_header *) msg->data)->tag, 0, fn, ##__VA_ARGS__)) \
-            pr_err_ratelimited("aaudio: Failed to reply to a command\n"); \
+            pr_err_ratelimited("Failed to reply to a command\n"); \
     } while (0)
 
 static void aaudio_ts_work(struct work_struct *ws)

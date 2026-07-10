@@ -51,7 +51,7 @@ struct bce_vhci_command_queue_completion {
 struct bce_vhci_command_queue {
     struct bce_vhci_message_queue *mq;
     struct bce_vhci_command_queue_completion completion;
-    struct spinlock completion_lock;
+    spinlock_t completion_lock;
     struct mutex mutex;
 };
 

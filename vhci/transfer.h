@@ -29,7 +29,7 @@ struct bce_vhci_transfer_queue {
     struct bce_queue_sq *sq_in;
     struct bce_queue_sq *sq_out;
     struct list_head evq;
-    struct spinlock urb_lock;
+    spinlock_t urb_lock;
     struct mutex pause_lock;
     struct list_head giveback_urb_list;
 

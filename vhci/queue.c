@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "bce-vhci: " fmt
+
 #include "queue.h"
 #include "vhci.h"
 #include "../apple_bce.h"
@@ -52,7 +54,7 @@ void bce_vhci_message_queue_write(struct bce_vhci_message_queue *q, struct bce_v
     struct bce_qe_submission *s;
     sidx = q->sq->tail;
     s = bce_next_submission(q->sq);
-    pr_debug("bce-vhci: Send message: %x s=%x p1=%x p2=%llx\n", req->cmd, req->status, req->param1, req->param2);
+    pr_debug("Send message: %x s=%x p1=%x p2=%llx\n", req->cmd, req->status, req->param1, req->param2);
     q->data[sidx] = *req;
     bce_set_submission_single(s, q->dma_addr + sizeof(struct bce_vhci_message) * sidx,
             sizeof(struct bce_vhci_message));
@@ -120,7 +122,7 @@ static void bce_vhci_event_queue_completion(struct bce_queue_sq *sq)
             continue;
         }
         msg = &ev->data[sq->head];
-        pr_debug("bce-vhci: Got event: %x s=%x p1=%x p2=%llx\n", msg->cmd, msg->status, msg->param1, msg->param2);
+        pr_debug("Got event: %x s=%x p1=%x p2=%llx\n", msg->cmd, msg->status, msg->param1, msg->param2);
         ev->cb(ev, msg);
 
         bce_notify_submission_complete(sq);
@@ -138,7 +140,7 @@ void bce_vhci_event_queue_submit_pending(struct bce_vhci_event_queue *q, size_t 
     struct bce_qe_submission *s;
     while (count--) {
         if (bce_reserve_submission(q->sq, NULL)) {
-            pr_err("bce-vhci: Failed to reserve an event queue submission\n");
+            pr_err("Failed to reserve an event queue submission\n");
             break;
         }
         idx = q->sq->tail;
@@ -155,12 +157,12 @@ void bce_vhci_event_queue_pause(struct bce_vhci_event_queue *q)
     reinit_completion(&q->queue_empty_completion);
     WRITE_ONCE(q->draining, true);
     if (bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, q->sq->qid))
-        pr_warn("bce-vhci: failed to flush event queue\n");
+        pr_warn("failed to flush event queue\n");
     timeout = msecs_to_jiffies(5000);
     while (atomic_read(&q->sq->available_commands) != q->sq->el_count - 1) {
         timeout = wait_for_completion_timeout(&q->queue_empty_completion, timeout);
         if (timeout == 0) {
-            pr_err("bce-vhci: waiting for queue to be flushed timed out\n");
+            pr_err("waiting for queue to be flushed timed out\n");
             break;
         }
     }
@@ -170,12 +172,12 @@ void bce_vhci_event_queue_resume(struct bce_vhci_event_queue *q)
 {
     WRITE_ONCE(q->draining, false);
     if (atomic_read(&q->sq->available_commands) != q->sq->el_count - 1) {
-        pr_warn("bce-vhci: resume: event queue not fully drained, flushing\n");
+        pr_warn("resume: event queue not fully drained, flushing\n");
         bce_cmd_flush_memory_queue(q->vhci->dev->cmd_cmdq, q->sq->qid);
         /* Wait briefly for stale completions to arrive */
         msleep(50);
         if (atomic_read(&q->sq->available_commands) != q->sq->el_count - 1) {
-            pr_err("bce-vhci: resume: event queue still has %d pending after flush\n",
+            pr_err("resume: event queue still has %d pending after flush\n",
                    q->sq->el_count - 1 - atomic_read(&q->sq->available_commands));
             return;
         }
@@ -245,7 +247,7 @@ static int __bce_vhci_command_queue_execute(struct bce_vhci_command_queue *cq, s
 
     if (!wait_for_completion_timeout(&c->completion, timeout)) {
         /* we ran out of time, send cancellation */
-        pr_debug("bce-vhci: command timed out req=%x\n", req->cmd);
+        pr_debug("command timed out req=%x\n", req->cmd);
         if ((status = bce_reserve_submission(cq->mq->sq, &timeout))) {
             spin_lock(&cq->completion_lock);
             c->result = NULL;
@@ -266,7 +268,7 @@ static int __bce_vhci_command_queue_execute(struct bce_vhci_command_queue *cq, s
              * the recovery worker's own timed-out commands from spawning
              * an infinite chain of recovery attempts. */
             if (!atomic_read(&vhci->recovering)) {
-                pr_err("bce-vhci: Possible desync, cmd cancel timed out — scheduling recovery\n");
+                pr_err("Possible desync, cmd cancel timed out — scheduling recovery\n");
                 schedule_work(&vhci->w_recovery);
             }
             return -ETIMEDOUT;
@@ -277,7 +279,7 @@ static int __bce_vhci_command_queue_execute(struct bce_vhci_command_queue *cq, s
     }
 
     if ((res->cmd & ~0x8000) != req->cmd) {
-        pr_err("bce-vhci: Possible desync, cmd reply mismatch req=%x, res=%x\n", req->cmd, res->cmd);
+        pr_err("Possible desync, cmd reply mismatch req=%x, res=%x\n", req->cmd, res->cmd);
         return -EIO;
     }
     if (res->status == BCE_VHCI_SUCCESS)

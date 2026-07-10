@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "bce-vhci: " fmt
+
 #include "transfer.h"
 #include "../queue.h"
 #include "vhci.h"
@@ -110,7 +112,7 @@ static void bce_vhci_transfer_queue_defer_event(struct bce_vhci_transfer_queue *
         /* Dropping the event silently would desync the endpoint state
          * machine (an URB would wait forever for its TRANSFER_REQUEST);
          * go through the stall/reset path instead. */
-        pr_err("bce-vhci: [%02x] failed to allocate deferred event, resetting endpoint\n", q->endp_addr);
+        pr_err("[%02x] failed to allocate deferred event, resetting endpoint\n", q->endp_addr);
         q->stalled = true;
         bce_vhci_transfer_queue_request_reset(q);
         return;
@@ -211,7 +213,7 @@ void bce_vhci_transfer_queue_event(struct bce_vhci_transfer_queue *q, struct bce
         goto complete;
     }
     if (list_empty(&q->endp->urb_list)) {
-        pr_err("bce-vhci: [%02x] Unexpected transfer queue event\n", q->endp_addr);
+        pr_err("[%02x] Unexpected transfer queue event\n", q->endp_addr);
         goto complete;
     }
     urb = list_first_entry(&q->endp->urb_list, struct urb, urb_list);
@@ -241,7 +243,7 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
          * for all pending DMA transfers before destroying the queue.
          */
         if (c->status == BCE_COMPLETION_ABORTED) { /* We flushed the queue */
-            pr_debug("bce-vhci: [%02x] Got an abort completion\n", q->endp_addr);
+            pr_debug("[%02x] Got an abort completion\n", q->endp_addr);
             if (is_sq_out && atomic_dec_if_positive(&q->sq_out_pending) == 0)
                 wake_up(&q->sq_out_wait_queue);
             bce_notify_submission_complete(sq);
@@ -270,13 +272,13 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
             /* Expected during teardown: URB was cancelled and unlinked from
              * endp->urb_list, but T2's in-flight DMA completion arrived after.
              * The completion slot is properly consumed below. */
-            pr_debug("bce-vhci: [%02x] Got a completion while no requests are pending\n", q->endp_addr);
+            pr_debug("[%02x] Got a completion while no requests are pending\n", q->endp_addr);
             if (is_sq_out && atomic_dec_if_positive(&q->sq_out_pending) == 0)
                 wake_up(&q->sq_out_wait_queue);
             bce_notify_submission_complete(sq);
             continue;
         }
-        pr_debug("bce-vhci: [%02x] Got a transfer queue completion\n", q->endp_addr);
+        pr_debug("[%02x] Got a transfer queue completion\n", q->endp_addr);
         urb = list_first_entry(&q->endp->urb_list, struct urb, urb_list);
         bce_vhci_urb_transfer_completion(urb->hcpriv, c);
         if (is_sq_out && atomic_dec_if_positive(&q->sq_out_pending) == 0)
@@ -300,7 +302,7 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
     int pending;
     long timeout;
 
-    pr_debug("bce-vhci: [%02x] pause (dev=%d)\n", q->endp_addr, q->dev_addr);
+    pr_debug("[%02x] pause (dev=%d)\n", q->endp_addr, q->dev_addr);
 
     spin_lock_irqsave(&q->urb_lock, flags);
     q->active = false;
@@ -326,7 +328,7 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
             if (timeout == 0) {
                 pending = atomic_read(&q->sq_out_pending);
                 if (pending > 0)
-                    pr_warn("bce-vhci: [%02x] pause: timeout waiting for %d pending outputs\n",
+                    pr_warn("[%02x] pause: timeout waiting for %d pending outputs\n",
                             q->endp_addr, pending);
             }
         }
@@ -338,10 +340,10 @@ int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q)
         /* Fall through to flush. Returning error here prevents paused_by
          * from being set, causing the deferred pause worker to retry in a
          * loop where each attempt burns a full T2 command timeout (~3s). */
-        pr_warn("bce-vhci: [%02x] pause: set_state failed (%d), continuing with local cleanup\n",
+        pr_warn("[%02x] pause: set_state failed (%d), continuing with local cleanup\n",
                 q->endp_addr, status);
     } else if (q->state != BCE_VHCI_ENDPOINT_PAUSED) {
-        pr_err("bce-vhci: [%02x] pause: unexpected state %d\n", q->endp_addr, q->state);
+        pr_err("[%02x] pause: unexpected state %d\n", q->endp_addr, q->state);
         return -EINVAL;
     }
 
@@ -517,7 +519,7 @@ int bce_vhci_urb_create(struct bce_vhci_transfer_queue *q, struct urb *urb, gfp_
     }
     spin_unlock_irqrestore(&q->urb_lock, flags);
     bce_vhci_transfer_queue_giveback(q);
-    pr_debug("bce-vhci: [%02x] URB enqueued (dir = %s, size = %i)\n", q->endp_addr,
+    pr_debug("[%02x] URB enqueued (dir = %s, size = %i)\n", q->endp_addr,
             usb_urb_dir_in(urb) ? "IN" : "OUT", urb->transfer_buffer_length);
     return status;
 }
@@ -527,7 +529,7 @@ static int bce_vhci_urb_init(struct bce_vhci_urb *vurb)
     int status = 0;
 
     if (vurb->q->remaining_active_requests == 0) {
-        pr_err("bce-vhci: cannot init request (remaining_active_requests = 0)\n");
+        pr_err("cannot init request (remaining_active_requests = 0)\n");
         return -EINVAL;
     }
 
@@ -548,7 +550,7 @@ static void bce_vhci_urb_complete(struct bce_vhci_urb *urb, int status)
     struct bce_vhci_transfer_queue *q = urb->q;
     struct bce_vhci *vhci = q->vhci;
     struct urb *real_urb = urb->urb;
-    pr_debug("bce-vhci: [%02x] URB complete %i\n", q->endp_addr, status);
+    pr_debug("[%02x] URB complete %i\n", q->endp_addr, status);
     usb_hcd_unlink_urb_from_ep(vhci->hcd, real_urb);
     real_urb->hcpriv = NULL;
     real_urb->status = status;
@@ -577,7 +579,7 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
 
     if (old_state == BCE_VHCI_URB_CANCELLED) {
         spin_unlock_irqrestore(&q->urb_lock, flags);
-        pr_debug("bce-vhci: URB %p is already cancelled, skipping\n", urb);
+        pr_debug("URB %p is already cancelled, skipping\n", urb);
         return 0;
     }
 
@@ -648,7 +650,7 @@ static void bce_vhci_transfer_queue_flush_w(struct work_struct *work)
  * Interrupt, bulk, and control all go through VHC1HostAsynchronousEvents
  * (T2 does NOT accept TRANSFER_REQUEST on VHC1HostInterruptEvents). */
 static void bce_vhci_get_msg_queue(struct bce_vhci_transfer_queue *q,
-        struct bce_vhci_message_queue **mq, struct spinlock **lock)
+        struct bce_vhci_message_queue **mq, spinlock_t **lock)
 {
     struct bce_vhci *vhci = q->vhci;
     switch (usb_endpoint_type(&q->endp->desc)) {
@@ -668,11 +670,11 @@ static int bce_vhci_urb_data_transfer_in(struct bce_vhci_urb *urb, unsigned long
     struct bce_vhci_message msg;
     struct bce_qe_submission *s;
     struct bce_vhci_message_queue *mq;
-    struct spinlock *mq_lock;
+    spinlock_t *mq_lock;
     u32 tr_len;
     int reservation1, reservation2 = -EFAULT;
 
-    pr_debug("bce-vhci: [%02x] DMA from device %llx %x\n", urb->q->endp_addr,
+    pr_debug("[%02x] DMA from device %llx %x\n", urb->q->endp_addr,
              (u64) urb->urb->transfer_dma, urb->urb->transfer_buffer_length);
 
     bce_vhci_get_msg_queue(urb->q, &mq, &mq_lock);
@@ -682,7 +684,7 @@ static int bce_vhci_urb_data_transfer_in(struct bce_vhci_urb *urb, unsigned long
     if (!reservation1)
         reservation2 = bce_reserve_submission(urb->q->sq_in, timeout);
     if (reservation1 || reservation2) {
-        pr_err("bce-vhci: Failed to reserve a submission for URB data transfer\n");
+        pr_err("Failed to reserve a submission for URB data transfer\n");
         if (!reservation1)
             bce_cancel_submission_reservation(mq->sq);
         return -ENOMEM;
@@ -726,11 +728,11 @@ static int bce_vhci_urb_send_out_data(struct bce_vhci_urb *urb, dma_addr_t addr,
     struct bce_qe_submission *s;
     unsigned long timeout = 0;
     if (bce_reserve_submission(urb->q->sq_out, &timeout)) {
-        pr_err("bce-vhci: Failed to reserve a submission for URB data transfer\n");
+        pr_err("Failed to reserve a submission for URB data transfer\n");
         return -EPIPE;
     }
 
-    pr_debug("bce-vhci: [%02x] DMA to device %llx %lx\n", urb->q->endp_addr, (u64) addr, size);
+    pr_debug("[%02x] DMA to device %llx %lx\n", urb->q->endp_addr, (u64) addr, size);
 
     s = bce_next_submission(urb->q->sq_out);
     bce_set_submission_single(s, addr, size);
@@ -758,7 +760,7 @@ static int bce_vhci_urb_data_update(struct bce_vhci_urb *urb, struct bce_vhci_me
     /* 0x1000 in out queues aren't really unexpected */
     if (msg->cmd == BCE_VHCI_CMD_TRANSFER_REQUEST && urb->q->sq_out != NULL)
         return -EAGAIN;
-    pr_err("bce-vhci: [%02x] %s URB unexpected message (state = %x, msg: %x %x %x %llx)\n",
+    pr_err("[%02x] %s URB unexpected message (state = %x, msg: %x %x %x %llx)\n",
             urb->q->endp_addr, (urb->is_control ? "Control (data update)" : "Data"), urb->state,
             msg->cmd, msg->status, msg->param1, msg->param2);
     return -EAGAIN;
@@ -798,7 +800,7 @@ static int bce_vhci_urb_data_transfer_completion(struct bce_vhci_urb *urb, struc
             }
         }
     } else {
-        pr_err("bce-vhci: [%02x] Data URB unexpected completion\n", urb->q->endp_addr);
+        pr_err("[%02x] Data URB unexpected completion\n", urb->q->endp_addr);
     }
     return 0;
 }
@@ -816,13 +818,13 @@ static int bce_vhci_urb_control_check_status(struct bce_vhci_urb *urb)
         if (urb->received_status != BCE_VHCI_SUCCESS) {
             if (urb->is_control && urb->urb->setup_packet) {
                 struct usb_ctrlrequest *setup = (struct usb_ctrlrequest *)urb->urb->setup_packet;
-                pr_err("bce-vhci: [%02x] URB failed: %x (dev=%d) setup=%02x/%02x val=%04x idx=%04x len=%04x\n",
+                pr_err("[%02x] URB failed: %x (dev=%d) setup=%02x/%02x val=%04x idx=%04x len=%04x\n",
                        urb->q->endp_addr, urb->received_status, urb->q->dev_addr,
                        setup->bRequestType, setup->bRequest,
                        le16_to_cpu(setup->wValue), le16_to_cpu(setup->wIndex),
                        le16_to_cpu(setup->wLength));
             } else {
-                pr_err("bce-vhci: [%02x] URB failed: %x (dev=%d)\n",
+                pr_err("[%02x] URB failed: %x (dev=%d)\n",
                        urb->q->endp_addr, urb->received_status, urb->q->dev_addr);
             }
             urb->q->active = false;
@@ -849,11 +851,11 @@ static int bce_vhci_urb_control_update(struct bce_vhci_urb *urb, struct bce_vhci
     if (urb->state == BCE_VHCI_URB_CONTROL_WAITING_FOR_SETUP_REQUEST) {
         if (msg->cmd == BCE_VHCI_CMD_TRANSFER_REQUEST) {
             if (bce_vhci_urb_send_out_data(urb, urb->urb->setup_dma, sizeof(struct usb_ctrlrequest))) {
-                pr_err("bce-vhci: [%02x] Failed to start URB setup transfer\n", urb->q->endp_addr);
+                pr_err("[%02x] Failed to start URB setup transfer\n", urb->q->endp_addr);
                 return 0; /* TODO: fail the URB? */
             }
             urb->state = BCE_VHCI_URB_CONTROL_WAITING_FOR_SETUP_COMPLETION;
-            pr_debug("bce-vhci: [%02x] Sent setup %llx\n", urb->q->endp_addr, urb->urb->setup_dma);
+            pr_debug("[%02x] Sent setup %llx\n", urb->q->endp_addr, urb->urb->setup_dma);
             return 0;
         }
     } else if (urb->state == BCE_VHCI_URB_WAITING_FOR_TRANSFER_REQUEST ||
@@ -866,7 +868,7 @@ static int bce_vhci_urb_control_update(struct bce_vhci_urb *urb, struct bce_vhci
     /* 0x1000 in out queues aren't really unexpected */
     if (msg->cmd == BCE_VHCI_CMD_TRANSFER_REQUEST && urb->q->sq_out != NULL)
         return -EAGAIN;
-    pr_err("bce-vhci: [%02x] Control URB unexpected message (state = %x, msg: %x %x %x %llx)\n", urb->q->endp_addr,
+    pr_err("[%02x] Control URB unexpected message (state = %x, msg: %x %x %x %llx)\n", urb->q->endp_addr,
             urb->state, msg->cmd, msg->status, msg->param1, msg->param2);
     return -EAGAIN;
 }
@@ -877,7 +879,7 @@ static int bce_vhci_urb_control_transfer_completion(struct bce_vhci_urb *urb, st
 
     if (urb->state == BCE_VHCI_URB_CONTROL_WAITING_FOR_SETUP_COMPLETION) {
         if (c->data_size != sizeof(struct usb_ctrlrequest))
-            pr_err("bce-vhci: [%02x] transfer complete data size mistmatch for usb_ctrlrequest (%llx instead of %lx)\n",
+            pr_err("[%02x] transfer complete data size mistmatch for usb_ctrlrequest (%llx instead of %lx)\n",
                    urb->q->endp_addr, c->data_size, sizeof(struct usb_ctrlrequest));
 
         /* Runs under q->urb_lock from the completion path — must not sleep,
@@ -894,7 +896,7 @@ static int bce_vhci_urb_control_transfer_completion(struct bce_vhci_urb *urb, st
             return status;
         return bce_vhci_urb_control_check_status(urb);
     } else {
-        pr_err("bce-vhci: [%02x] Control URB unexpected completion (state = %x)\n", urb->q->endp_addr, urb->state);
+        pr_err("[%02x] Control URB unexpected completion (state = %x)\n", urb->q->endp_addr, urb->state);
     }
     return 0;
 }

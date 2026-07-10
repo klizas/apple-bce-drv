@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "aaudio: " fmt
+
 #include "pcm.h"
 #include "audio.h"
 #include <linux/dma-mapping.h>
@@ -17,7 +19,7 @@ static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
             else
                 return SNDRV_PCM_FMTBIT_FLOAT64_LE;
         } else {
-            pr_err("aaudio: unsupported bits per channel for float format: %u\n", desc->bits_per_channel);
+            pr_err("unsupported bits per channel for float format: %u\n", desc->bits_per_channel);
             return 0;
         }
     }
@@ -42,7 +44,7 @@ static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
                 break;
             DEFINE_BPC_OPTION(24, 24_3)
             default:
-                pr_err("aaudio: unsupported bits per channel for packed format: %u\n", desc->bits_per_channel);
+                pr_err("unsupported bits per channel for packed format: %u\n", desc->bits_per_channel);
                 return 0;
         }
     }
@@ -50,7 +52,7 @@ static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
         switch (desc->bits_per_channel) {
             DEFINE_BPC_OPTION(24, 32_)
             default:
-                pr_err("aaudio: unsupported bits per channel for high-aligned format: %u\n", desc->bits_per_channel);
+                pr_err("unsupported bits per channel for high-aligned format: %u\n", desc->bits_per_channel);
                 return 0;
         }
     }
@@ -64,7 +66,7 @@ static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
         DEFINE_BPC_OPTION(24, 24_)
         DEFINE_BPC_OPTION(32, 32_)
         default:
-            pr_err("aaudio: unsupported bits per channel: %u\n", desc->bits_per_channel);
+            pr_err("unsupported bits per channel: %u\n", desc->bits_per_channel);
             return 0;
     }
 }
@@ -76,7 +78,7 @@ int aaudio_create_hw_info(struct aaudio_apple_description *desc, struct snd_pcm_
      * failed it is all zeros and would cause divisions by zero here, in
      * the period-size constraint and in the timestamp handler. */
     if (!desc->bytes_per_packet || !desc->frames_per_packet || !desc->channels_per_frame) {
-        pr_err("aaudio: invalid stream descriptor (bpp=%u fpp=%u ch=%u)\n",
+        pr_err("invalid stream descriptor (bpp=%u fpp=%u ch=%u)\n",
                 desc->bytes_per_packet, desc->frames_per_packet, desc->channels_per_frame);
         return -EINVAL;
     }
@@ -85,7 +87,7 @@ int aaudio_create_hw_info(struct aaudio_apple_description *desc, struct snd_pcm_
                      SNDRV_PCM_INFO_MMAP_VALID |
                      SNDRV_PCM_INFO_DOUBLE);
     if (desc->format_flags & AAUDIO_FORMAT_FLAG_NON_MIXABLE)
-        pr_warn("aaudio: unsupported hw flag: NON_MIXABLE\n");
+        pr_warn("unsupported hw flag: NON_MIXABLE\n");
     if (!(desc->format_flags & AAUDIO_FORMAT_FLAG_NON_INTERLEAVED))
         alsa_hw->info |= SNDRV_PCM_INFO_INTERLEAVED;
     alsa_hw->formats = aaudio_get_alsa_fmtbit(desc);
@@ -93,7 +95,7 @@ int aaudio_create_hw_info(struct aaudio_apple_description *desc, struct snd_pcm_
         return -EINVAL;
     rate = (uint) aaudio_double_to_u64(desc->sample_rate_double);
     if (!rate) {
-        pr_err("aaudio: invalid stream descriptor sample rate\n");
+        pr_err("invalid stream descriptor sample rate\n");
         return -EINVAL;
     }
     alsa_hw->rates = snd_pcm_rate_to_rate_bit(rate);
@@ -254,7 +256,7 @@ static void aaudio_pcm_start(struct snd_pcm_substream *substream)
     }
 
     time_end = ktime_get();
-    pr_debug("aaudio: Started the audio device in %lluns\n", ktime_to_ns(time_end - time_start));
+    pr_debug("Started the audio device in %lluns\n", ktime_to_ns(time_end - time_start));
 }
 
 static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)

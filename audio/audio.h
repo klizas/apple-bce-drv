@@ -90,7 +90,7 @@ struct aaudio_subdevice {
      * trigger holds them while waiting for its start/stop_io reply,
      * which is delivered by that same thread. */
     struct work_struct ts_work;
-    struct spinlock ts_lock;
+    spinlock_t ts_lock;
     ktime_t ts_time_os;
     u64 ts_dev_timestamp;
     u32 in_latency, out_latency;

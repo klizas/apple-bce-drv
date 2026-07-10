@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "apple-bce: " fmt
+
 #include "apple_bce.h"
 #include <linux/module.h>
 #include <linux/crc32.h>
@@ -22,7 +24,7 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     int status = 0;
     int nvec;
 
-    pr_info("apple-bce: capturing our device\n");
+    pr_info("capturing our device\n");
 
     if (pci_enable_device(dev))
         return -ENODEV;
@@ -31,9 +33,9 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
         goto fail;
     }
     pci_set_master(dev);
-    nvec = pci_alloc_irq_vectors(dev, 1, 8, PCI_IRQ_MSI);
-    if (nvec < 5) {
-        status = -EINVAL;
+    nvec = pci_alloc_irq_vectors(dev, 5, 8, PCI_IRQ_MSI);
+    if (nvec < 0) {
+        status = nvec;
         goto fail;
     }
 
@@ -63,7 +65,7 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     bce->reg_mem_dma = pci_iomap(dev, 2, 0);
 
     if (IS_ERR_OR_NULL(bce->reg_mem_mb) || IS_ERR_OR_NULL(bce->reg_mem_dma)) {
-        dev_warn(&dev->dev, "apple-bce: Failed to pci_iomap required regions\n");
+        dev_warn(&dev->dev, "Failed to pci_iomap required regions\n");
         goto fail;
     }
 
@@ -88,13 +90,13 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
        is a bus master, so we need to work around this. */
     bce->pci0 = pci_get_slot(dev->bus, PCI_DEVFN(PCI_SLOT(dev->devfn), 0));
     if (!bce->pci0) {
-        dev_warn(&dev->dev, "apple-bce: failed to find function 0\n");
+        dev_warn(&dev->dev, "failed to find function 0\n");
         status = -ENODEV;
         goto fail_interrupt;
     }
 #ifndef WITHOUT_NVME_PATCH
     if ((status = pci_enable_device_mem(bce->pci0))) {
-        dev_warn(&dev->dev, "apple-bce: failed to enable function 0\n");
+        dev_warn(&dev->dev, "failed to enable function 0\n");
         goto fail_dev0;
     }
 #endif
@@ -104,15 +106,15 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     if ((status = bce_fw_version_handshake(bce)))
         goto fail_ts;
-    pr_info("apple-bce: handshake done\n");
+    pr_info("handshake done\n");
 
     if ((status = bce_create_command_queues(bce))) {
-        pr_info("apple-bce: Creating command queues failed\n");
+        pr_info("Creating command queues failed\n");
         goto fail_ts;
     }
 
     if ((status = bce_vhci_create(bce, &bce->vhci))) {
-        pr_err("apple-bce: VHCI creation failed\n");
+        pr_err("VHCI creation failed\n");
         goto fail_vhci;
     }
 
@@ -122,7 +124,7 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     bce->pci0_link = device_link_add(&dev->dev, &bce->pci0->dev,
                                      DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME);
     if (!bce->pci0_link)
-        dev_warn(&dev->dev, "apple-bce: failed to create device link to function 0\n");
+        dev_warn(&dev->dev, "failed to create device link to function 0\n");
 
     global_bce = bce;
 
@@ -278,7 +280,7 @@ static int bce_fw_version_handshake(struct apple_bce_device *bce)
         return status;
     if (BCE_MB_TYPE(result) != BCE_MB_SET_FW_PROTOCOL_VERSION ||
         BCE_MB_VALUE(result) != BC_PROTOCOL_VERSION) {
-        pr_err("apple-bce: FW version handshake failed %x:%llx\n", BCE_MB_TYPE(result), BCE_MB_VALUE(result));
+        pr_err("FW version handshake failed %x:%llx\n", BCE_MB_TYPE(result), BCE_MB_VALUE(result));
         return -EINVAL;
     }
     return 0;
@@ -343,10 +345,10 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
     size_t size = PAGE_SIZE;
 
     for (attempt = 0; attempt < 5; ++attempt) {
-        pr_debug("apple-bce: suspend: attempt %i, buffer size %li\n", attempt, size);
+        pr_debug("suspend: attempt %i, buffer size %zu\n", attempt, size);
         dma_ptr = dma_alloc_coherent(&bce->pci->dev, size, &dma_addr, GFP_KERNEL);
         if (!dma_ptr) {
-            pr_err("apple-bce: suspend failed (data alloc failed)\n");
+            pr_err("suspend failed (data alloc failed)\n");
             break;
         }
         if (WARN_ON_ONCE((dma_addr % 4096) != 0)) {
@@ -357,7 +359,7 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
                 BCE_MB_MSG(BCE_MB_SAVE_STATE_AND_SLEEP, (dma_addr & ~(4096LLU - 1)) | (size / 4096)), &resp,
                 BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS);
         if (status) {
-            pr_err("apple-bce: suspend failed (mailbox send)\n");
+            pr_err("suspend failed (mailbox send)\n");
             break;
         }
         if (BCE_MB_TYPE(resp) == BCE_MB_SAVE_RESTORE_STATE_COMPLETE) {
@@ -370,10 +372,10 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
             dma_ptr = NULL;
             /* The 0x10ff magic value was extracted from Apple's driver */
             size = (BCE_MB_VALUE(resp) + 0x10ff) & ~(4096LLU - 1);
-            pr_debug("apple-bce: suspend: device requested a larger buffer (%li)\n", size);
+            pr_debug("suspend: device requested a larger buffer (%zu)\n", size);
             continue;
         } else {
-            pr_err("apple-bce: suspend failed (invalid device response)\n");
+            pr_err("suspend failed (invalid device response)\n");
             status = -EINVAL;
             break;
         }
@@ -393,11 +395,11 @@ static int bce_restore_state_and_wake(struct apple_bce_device *bce)
     if (!bce->saved_data_dma_ptr) {
         if ((status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_RESTORE_NO_STATE, 0), &resp,
                 BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS))) {
-            pr_err("apple-bce: resume with no state failed (mailbox send)\n");
+            pr_err("resume with no state failed (mailbox send)\n");
             return status;
         }
         if (BCE_MB_TYPE(resp) != BCE_MB_RESTORE_NO_STATE) {
-            pr_err("apple-bce: resume with no state failed (invalid device response)\n");
+            pr_err("resume with no state failed (invalid device response)\n");
             return -EINVAL;
         }
         return 0;
@@ -406,11 +408,11 @@ static int bce_restore_state_and_wake(struct apple_bce_device *bce)
     if ((status = bce_mailbox_send(&bce->mbox, BCE_MB_MSG(BCE_MB_RESTORE_STATE_AND_WAKE,
             (bce->saved_data_dma_addr & ~(4096LLU - 1)) | (bce->saved_data_dma_size / 4096)), &resp,
             BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS))) {
-        pr_err("apple-bce: resume with state failed (mailbox send)\n");
+        pr_err("resume with state failed (mailbox send)\n");
         goto finish_with_state;
     }
     if (BCE_MB_TYPE(resp) != BCE_MB_SAVE_RESTORE_STATE_COMPLETE) {
-        pr_err("apple-bce: resume with state failed (invalid device response)\n");
+        pr_err("resume with state failed (invalid device response)\n");
         status = -EINVAL;
         goto finish_with_state;
     }
@@ -463,7 +465,7 @@ static int apple_bce_resume(struct device *dev)
             msleep(50);
     }
     if (vid != PCI_VENDOR_ID_APPLE) {
-        pr_err("apple-bce: resume: T2 not accessible after timeout (vid=0x%04x)\n", vid);
+        pr_err("resume: T2 not accessible after timeout (vid=0x%04x)\n", vid);
         enable_irq(pci_irq_vector(bce->pci, 4));
         return -ENODEV;
     }
@@ -518,7 +520,7 @@ static int __init apple_bce_module_init(void)
         goto fail_chrdev;
     }
     if ((result = bce_vhci_module_init())) {
-        pr_err("apple-bce: bce-vhci init failed");
+        pr_err("bce-vhci init failed\n");
         goto fail_class;
     }
 
