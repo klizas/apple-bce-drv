@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "apple-bce: " fmt
+
 #include "queue_dma.h"
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
@@ -19,7 +21,7 @@ int bce_map_dma_buffer(struct device *dev, struct bce_dma_buffer *buf, struct sg
 
     cnt = dma_map_sg(dev, buf->scatterlist.sgl, buf->scatterlist.nents, dir);
     if (cnt != buf->scatterlist.nents) {
-        pr_err("apple-bce: DMA scatter list mapping returned an unexpected count: %i\n", cnt);
+        pr_err("DMA scatter list mapping returned an unexpected count: %i\n", cnt);
         dma_unmap_sg(dev, buf->scatterlist.sgl, buf->scatterlist.nents, dir);
         return -EIO;
     }
@@ -28,7 +30,7 @@ int bce_map_dma_buffer(struct device *dev, struct bce_dma_buffer *buf, struct sg
 
     buf->seglist_hostinfo = bce_map_segment_list(dev, buf->scatterlist.sgl, buf->scatterlist.nents);
     if (!buf->seglist_hostinfo) {
-        pr_err("apple-bce: Creating segment list failed\n");
+        pr_err("Creating segment list failed\n");
         dma_unmap_sg(dev, buf->scatterlist.sgl, buf->scatterlist.nents, dir);
         return -EIO;
     }

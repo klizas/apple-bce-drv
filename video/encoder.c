@@ -686,13 +686,13 @@ static void ave_encode_fail_cleanup(struct ave_session *session,
 	struct device *dev = &q->bce->pci->dev;
 
 	if (y_mapped || uv_mapped) {
-		u32 flush = bce_cmd_flush_memory_queue(q->bce->cmd_cmdq,
+		int flush = bce_cmd_flush_memory_queue(q->bce->cmd_cmdq,
 						       q->sq_submit->qid);
 		/* Unmap even on flush failure: with an IOMMU a late device
 		 * read faults loudly, whereas leaving the mapping alive
 		 * would let it scribble into pages vb2 later reuses. */
 		if (flush)
-			pr_warn("Q0 flush failed (0x%x) — unmapping anyway\n",
+			pr_warn("Q0 flush failed (%d) — unmapping anyway\n",
 				flush);
 	}
 	if (y_mapped)
