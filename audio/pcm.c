@@ -138,7 +138,7 @@ static enum hrtimer_restart aaudio_pcm_period_timer(struct hrtimer *timer)
 
     if (!READ_ONCE(stream->started))
         return HRTIMER_NORESTART;
-    schedule_work(&stream->period_work);
+    queue_work(system_highpri_wq, &stream->period_work);
     hrtimer_forward_now(timer, ns_to_ktime(stream->period_time_ns));
     return HRTIMER_RESTART;
 }
