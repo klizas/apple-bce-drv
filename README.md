@@ -1,24 +1,28 @@
 # Fork notes
-This fork fixes various issues discovered when using the original [apple-bce-drv](https://github.com/t2linux/apple-bce-drv) module:
-- Sleep / resume not working properly
-- Built-in camera
-- Audio: microphone capture, reliable period wakeups, honest hw pointer / latency reporting
-- USB
-- Various optimisations / bug fixes
-- Module param `apple_bce.timestamp_interval_ms` (T2 timestamp heartbeat, default 10s, 0 = off)
+This branch is [aur](https://github.com/klizas/apple-bce-drv/tree/aur) — all fixes to the original [apple-bce-drv](https://github.com/t2linux/apple-bce-drv) module (sleep/resume, camera, audio, USB, various optimisations; see its README) — plus a driver for the T2's hardware HEVC video encoder.
 
-There's also the [ave](https://github.com/klizas/apple-bce-drv/tree/ave) branch, with a driver for the T2's HEVC hardware video encoder.
+## Video encoder (AVE)
+The T2 inherits the Apple Video Encoder (AVE) block from the A10 it is derived from; macOS uses it through VideoToolbox for HEVC transcoding. This branch exposes it as a standard V4L2 stateful mem2mem encoder — `/dev/videoN`, card `Apple T2 HEVC Encoder`, `V4L2_CAP_VIDEO_M2M_MPLANE` — driven over BCE queues like audio and VHCI. Code lives in `video/`, built into the same `apple-bce` module.
+
+Capabilities:
+- Input: NV12 / NV12M, 128×128 to 4096×2304 in steps of 2, default 1920×1080.
+- Output: HEVC Annex B. VPS/SPS/PPS are prepended to IRAP frames; `V4L2_BUF_FLAG_KEYFRAME` is reported for firmware-scheduled keyframes too, not just forced ones.
+- Profile Main / Main 10, level up to 6.2 (default 5.1).
+- Rate control: VBR (default), CBR, or constant quality 1–100. Bitrate 100 kbit/s – 100 Mbit/s (default 4 Mbit/s), changeable on a live session; the new rate applies before the next frame.
+- GOP size 0–600 (0 = firmware default), HEVC min/max QP 0–51, `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`.
+- Frame rate via `VIDIOC_S_PARM`, default 30/1.
+- Colour primaries / transfer / matrix are forwarded to the firmware from the V4L2 colorspace of the input format.
+- Encode sessions are torn down on suspend; the firmware session does not survive S3.
+
+Works with any stateful-V4L2 userspace, e.g. `ffmpeg -c:v hevc_v4l2m2m` or GStreamer `v4l2h265enc`.
+
+### Runtime requirement: t2aved
+The encoder speaks an XPC protocol the kernel does not implement. The driver forwards encode sessions to a userspace daemon over a Unix socket — default `/run/aveserverd.sock`, overridable via the `sock_path` parameter on the `apple_bce` module.
+
+**[t2aved](https://github.com/klizas/t2aved) must be installed and running before anything opens the encoder's `/dev/videoN` node.** Without it the V4L2 device is present but non-functional (session setup fails). See the [t2aved README](https://github.com/klizas/t2aved#readme) for install and diagnostics.
 
 ## Tested on
 - MacBookPro16,1 2019
-
-Help expanding this list by submitting a PR or an issue.
-
-## My personal setup
-- MacBookPro16,1 2019
-- Kernel: stable CachyOS with custom [patches](https://github.com/klizas/t2-kernel-patches) and this module: https://github.com/klizas/cachyos-kernel-builder/releases/tag/latest
-- Using discrete AMD GPU exclusively
-- Boot args: `intel_iommu=on iommu=pt pcie_ports=compat`
 
 # Original README
 A driver for MacBook models 2018 and newer, implementing the VHCI (required for mouse/keyboard/etc.) and audio functionality.
@@ -31,4 +35,3 @@ The project is divided into 3 main components:
 Please note that the `master` branch does not currently support system suspend and resume.
 
 If you want to support me, you can do so by donating to me on PayPal: https://paypal.me/mcmrarm
-
