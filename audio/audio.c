@@ -63,8 +63,9 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     aaudio->devt = aaudio_chrdev;
     aaudio->dev = device_create(aaudio_class, &dev->dev, aaudio->devt, NULL, "aaudio");
-    if (IS_ERR_OR_NULL(aaudio->dev)) {
+    if (IS_ERR(aaudio->dev)) {
         status = PTR_ERR(aaudio->dev);
+        aaudio->dev = NULL;
         goto fail;
     }
     device_link_add(aaudio->dev, aaudio->bce->dev, DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);

@@ -53,8 +53,9 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     bce->devt = bce_chrdev;
     bce->dev = device_create(bce_class, &dev->dev, bce->devt, NULL, "apple-bce");
-    if (IS_ERR_OR_NULL(bce->dev)) {
+    if (IS_ERR(bce->dev)) {
         status = PTR_ERR(bce->dev);
+        bce->dev = NULL;
         goto fail;
     }
 
@@ -348,7 +349,10 @@ static int bce_save_state_and_sleep(struct apple_bce_device *bce)
             pr_err("apple-bce: suspend failed (data alloc failed)\n");
             break;
         }
-        BUG_ON((dma_addr % 4096) != 0);
+        if (WARN_ON_ONCE((dma_addr % 4096) != 0)) {
+            status = -EINVAL;
+            break;
+        }
         status = bce_mailbox_send(&bce->mbox,
                 BCE_MB_MSG(BCE_MB_SAVE_STATE_AND_SLEEP, (dma_addr & ~(4096LLU - 1)) | (size / 4096)), &resp,
                 BCE_MBOX_TIMEOUT_SAVE_RESTORE_MS);

@@ -34,8 +34,9 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
 
     vhci->vdevt = bce_vhci_chrdev;
     vhci->vdev = device_create(bce_vhci_class, dev->dev, vhci->vdevt, NULL, "bce-vhci");
-    if (IS_ERR_OR_NULL(vhci->vdev)) {
+    if (IS_ERR(vhci->vdev)) {
         status = PTR_ERR(vhci->vdev);
+        vhci->vdev = NULL;
         goto fail_dev;
     }
 
@@ -176,6 +177,9 @@ static int bce_vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue, u1
     struct usb_port_status *ps;
     u32 port_status;
     // pr_info("bce-vhci: bce_vhci_hub_control %x %i %i [bufl=%i]\n", typeReq, wValue, wIndex, wLength);
+    if ((typeReq == GetPortStatus || typeReq == SetPortFeature || typeReq == ClearPortFeature) &&
+        (wIndex < 1 || wIndex > vhci->port_count))
+        return -EPIPE;
     if (typeReq == GetHubDescriptor && wLength >= sizeof(struct usb_hub_descriptor)) {
         hd = (struct usb_hub_descriptor *) buf;
         memset(hd, 0, sizeof(*hd));
