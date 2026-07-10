@@ -1,4 +1,26 @@
-# MacBook Bridge/T2 Linux Driver
+# Fork notes
+This fork fixes various issues discovered when using the original [apple-bce-drv](https://github.com/t2linux/apple-bce-drv) module:
+- Sleep / resume not working properly
+- Built-in camera
+- Audio: microphone capture, reliable period wakeups, honest hw pointer / latency reporting
+- USB
+- Various optimisations / bug fixes
+- Module param `apple_bce.timestamp_interval_ms` (T2 timestamp heartbeat, default 10s, 0 = off)
+
+There's also the [ave](https://github.com/klizas/apple-bce-drv/tree/ave) branch, with a driver for the T2's HEVC hardware video encoder.
+
+## Tested on
+- MacBookPro16,1 2019
+
+Help expanding this list by submitting a PR or an issue.
+
+## My personal setup
+- MacBookPro16,1 2019
+- Kernel: stable CachyOS with custom [patches](https://github.com/klizas/t2-kernel-patches) and this module: https://github.com/klizas/cachyos-kernel-builder/releases/tag/latest
+- Using discrete AMD GPU exclusively
+- Boot args: `intel_iommu=on iommu=pt pcie_ports=compat`
+
+# Original README
 A driver for MacBook models 2018 and newer, implementing the VHCI (required for mouse/keyboard/etc.) and audio functionality.
 
 The project is divided into 3 main components:
@@ -10,14 +32,3 @@ Please note that the `master` branch does not currently support system suspend a
 
 If you want to support me, you can do so by donating to me on PayPal: https://paypal.me/mcmrarm
 
-## Fork notes
-
-This fork adds a fourth component on top of upstream:
-
-- **Video (AVE)** — a V4L2 mem2mem encoder exposing the T2's hardware HEVC encoder. NV12/NV12M input, HEVC bitstream output. Registers as `apple-ave` (card "Apple T2 HEVC Encoder") with `V4L2_CAP_VIDEO_M2M_MPLANE`. Lives in `video/`, built into the same `apple_bce` module as the rest of the driver.
-
-### Runtime requirement: t2aved
-
-The encoder speaks an XPC protocol the kernel does not implement. The driver forwards encode sessions to a userspace daemon over a Unix socket — default `/run/aveserverd.sock`, overridable via the `sock_path` parameter on the `apple_bce` module.
-
-**[t2aved](https://github.com/klizas/t2aved) must be installed and running before anything opens the encoder's `/dev/videoN` node.** Without it the V4L2 device is present but non-functional (session setup fails). See the [t2aved README](https://github.com/klizas/t2aved#readme) for install and diagnostics.
