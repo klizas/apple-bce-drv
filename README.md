@@ -14,8 +14,6 @@ Capabilities:
 - Colour primaries / transfer / matrix are forwarded to the firmware from the V4L2 colorspace of the input format.
 - Encode sessions are torn down on suspend; the firmware session does not survive S3.
 
-Works with any stateful-V4L2 userspace, e.g. `ffmpeg -c:v hevc_v4l2m2m` or GStreamer `v4l2h265enc`.
-
 ### Runtime requirement: t2aved
 The encoder speaks an XPC protocol the kernel does not implement. The driver forwards encode sessions to a userspace daemon over a Unix socket — default `/run/aveserverd.sock`, overridable via the `sock_path` parameter on the `apple_bce` module.
 
