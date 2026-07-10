@@ -53,4 +53,4 @@ void bce_timestamp_start(struct bce_timestamp *ts, bool is_initial);
 
 void bce_timestamp_stop(struct bce_timestamp *ts);
 
-#endif //BCEDRIVER_MAILBOX_H
+#endif //BCE_MAILBOX_H

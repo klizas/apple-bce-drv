@@ -112,7 +112,6 @@ struct aaudio_alsa_pcm_id_mapping {
 
 struct aaudio_device {
     struct pci_dev *pci;
-    dev_t devt;
     struct device *dev;
     void __iomem *reg_mem_bs;
     dma_addr_t reg_mem_bs_dma;

@@ -2,7 +2,6 @@
 
 #include "queue.h"
 #include "apple_bce.h"
-#include <linux/version.h>
 
 #define REG_DOORBELL_BASE 0x44000
 
@@ -356,20 +355,12 @@ EXPORT_SYMBOL_GPL(bce_cmd_flush_memory_queue);
 
 static int bce_qid_alloc(struct apple_bce_device *dev)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-    return ida_simple_get(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX, GFP_KERNEL);
-#else
     return ida_alloc_range(&dev->queue_ida, BCE_QUEUE_USER_MIN, BCE_QUEUE_USER_MAX - 1, GFP_KERNEL);
-#endif
 }
 
 static void bce_qid_free(struct apple_bce_device *dev, int qid)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
-    ida_simple_remove(&dev->queue_ida, (uint) qid);
-#else
     ida_free(&dev->queue_ida, (uint) qid);
-#endif
 }
 
 struct bce_queue_cq *bce_create_cq(struct apple_bce_device *dev, u32 el_count)

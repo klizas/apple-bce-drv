@@ -4,9 +4,7 @@
 #include <linux/module.h>
 #include <linux/crc32.h>
 #include "audio/audio.h"
-#include <linux/version.h>
 
-static dev_t bce_chrdev;
 static struct class *bce_class;
 
 struct apple_bce_device *global_bce;
@@ -53,8 +51,7 @@ static int apple_bce_probe(struct pci_dev *dev, const struct pci_device_id *id)
     bce->pci = dev;
     pci_set_drvdata(dev, bce);
 
-    bce->devt = bce_chrdev;
-    bce->dev = device_create(bce_class, &dev->dev, bce->devt, NULL, "apple-bce");
+    bce->dev = device_create(bce_class, &dev->dev, MKDEV(0, 0), NULL, "apple-bce");
     if (IS_ERR(bce->dev)) {
         status = PTR_ERR(bce->dev);
         bce->dev = NULL;
@@ -146,7 +143,7 @@ fail_interrupt_0:
 fail:
     if (bce) {
         if (bce->dev) {
-            device_destroy(bce_class, bce->devt);
+            device_destroy(bce_class, MKDEV(0, 0));
 
             if (!IS_ERR_OR_NULL(bce->reg_mem_mb))
                 pci_iounmap(dev, bce->reg_mem_mb);
@@ -328,7 +325,7 @@ static void apple_bce_remove(struct pci_dev *dev)
     bce_free_command_queues(bce);
     pci_iounmap(dev, bce->reg_mem_mb);
     pci_iounmap(dev, bce->reg_mem_dma);
-    device_destroy(bce_class, bce->devt);
+    device_destroy(bce_class, MKDEV(0, 0));
     pci_free_irq_vectors(dev);
     pci_release_regions(dev);
     pci_disable_device(dev);
@@ -508,17 +505,9 @@ static struct pci_driver apple_bce_pci_driver = {
 static int __init apple_bce_module_init(void)
 {
     int result;
-    if ((result = alloc_chrdev_region(&bce_chrdev, 0, 1, "apple-bce")))
-        return result;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
-    bce_class = class_create(THIS_MODULE, "apple-bce");
-#else
     bce_class = class_create("apple-bce");
-#endif
-    if (IS_ERR(bce_class)) {
-        result = PTR_ERR(bce_class);
-        goto fail_chrdev;
-    }
+    if (IS_ERR(bce_class))
+        return PTR_ERR(bce_class);
     if ((result = bce_vhci_module_init())) {
         pr_err("bce-vhci init failed\n");
         goto fail_class;
@@ -538,8 +527,6 @@ fail_vhci:
     bce_vhci_module_exit();
 fail_class:
     class_destroy(bce_class);
-fail_chrdev:
-    unregister_chrdev_region(bce_chrdev, 1);
     if (!result)
         result = -EINVAL;
     return result;
@@ -551,7 +538,6 @@ static void __exit apple_bce_module_exit(void)
 
     bce_vhci_module_exit();
     class_destroy(bce_class);
-    unregister_chrdev_region(bce_chrdev, 1);
 }
 
 MODULE_LICENSE("GPL");

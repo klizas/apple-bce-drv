@@ -6,9 +6,7 @@
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
 #include <linux/module.h>
-#include <linux/version.h>
 
-static dev_t bce_vhci_chrdev;
 static struct class *bce_vhci_class;
 static const struct hc_driver bce_vhci_driver;
 static u16 bce_vhci_port_mask = U16_MAX;
@@ -30,12 +28,9 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
 {
     int status;
 
-    spin_lock_init(&vhci->hcd_spinlock);
-
     vhci->dev = dev;
 
-    vhci->vdevt = bce_vhci_chrdev;
-    vhci->vdev = device_create(bce_vhci_class, dev->dev, vhci->vdevt, NULL, "bce-vhci");
+    vhci->vdev = device_create(bce_vhci_class, dev->dev, MKDEV(0, 0), NULL, "bce-vhci");
     if (IS_ERR(vhci->vdev)) {
         status = PTR_ERR(vhci->vdev);
         vhci->vdev = NULL;
@@ -66,9 +61,6 @@ int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci)
         goto fail_hcd;
     }
     vhci->hcd->self.sysdev = &dev->pci->dev;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0)
-    vhci->hcd->self.uses_dma = 1;
-#endif
     *((struct bce_vhci **) vhci->hcd->hcd_priv) = vhci;
     vhci->hcd->speed = HCD_USB2;
 
@@ -86,7 +78,7 @@ fail_wq:
 fail_eq:
     bce_vhci_destroy_message_queues(vhci);
 fail_mq:
-    device_destroy(bce_vhci_class, vhci->vdevt);
+    device_destroy(bce_vhci_class, MKDEV(0, 0));
 fail_dev:
     if (!status)
         status = -EINVAL;
@@ -104,7 +96,7 @@ void bce_vhci_destroy(struct bce_vhci *vhci)
     destroy_workqueue(vhci->tq_state_wq);
     bce_vhci_destroy_event_queues(vhci);
     bce_vhci_destroy_message_queues(vhci);
-    device_destroy(bce_vhci_class, vhci->vdevt);
+    device_destroy(bce_vhci_class, MKDEV(0, 0));
     usb_put_hcd(vhci->hcd);
 }
 
@@ -339,11 +331,7 @@ static int bce_vhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
     return 0;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,8,0)
-static int bce_vhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
-#else
 static int bce_vhci_address_device(struct usb_hcd *hcd, struct usb_device *udev, unsigned int timeout_ms) //TODO: follow timeout
-#endif
 {
     /* This is the same as enable_device, but instead in the old scheme */
     return bce_vhci_enable_device(hcd, udev);
@@ -941,7 +929,6 @@ static void bce_vhci_send_fw_event_response(struct bce_vhci *vhci, struct bce_vh
     struct bce_vhci_message r = *req;
     r.cmd = (u16) (req->cmd | 0x8000u);
     r.status = status;
-    r.param1 = req->param1;
     r.param2 = 0;
 
     if (bce_reserve_submission(vhci->msg_system.sq, &timeout)) {
@@ -1306,11 +1293,7 @@ static const struct hc_driver bce_vhci_driver = {
         .product_desc = "BCE VHCI Host Controller",
         .hcd_priv_size = sizeof(struct bce_vhci *),
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0)
-        .flags = HCD_USB2,
-#else
         .flags = HCD_USB2 | HCD_DMA,
-#endif
 
         .start = bce_vhci_start,
         .stop = bce_vhci_stop,
@@ -1333,24 +1316,12 @@ static const struct hc_driver bce_vhci_driver = {
 
 int __init bce_vhci_module_init(void)
 {
-    int result;
-    if ((result = alloc_chrdev_region(&bce_vhci_chrdev, 0, 1, "bce-vhci")))
-        return result;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
-    bce_vhci_class = class_create(THIS_MODULE, "bce-vhci");
-#else
     bce_vhci_class = class_create("bce-vhci");
-#endif
-    if (IS_ERR(bce_vhci_class)) {
-        unregister_chrdev_region(bce_vhci_chrdev, 1);
-        return PTR_ERR(bce_vhci_class);
-    }
-    return 0;
+    return PTR_ERR_OR_ZERO(bce_vhci_class);
 }
 void bce_vhci_module_exit(void)
 {
     class_destroy(bce_vhci_class);
-    unregister_chrdev_region(bce_vhci_chrdev, 1);
 }
 
 module_param_named(vhci_port_mask, bce_vhci_port_mask, ushort, 0444);

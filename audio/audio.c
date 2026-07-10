@@ -10,12 +10,10 @@
 #include <sound/jack.h>
 #include "audio.h"
 #include "pcm.h"
-#include <linux/version.h>
 
 static int aaudio_alsa_index = SNDRV_DEFAULT_IDX1;
 static char *aaudio_alsa_id = SNDRV_DEFAULT_STR1;
 
-static dev_t aaudio_chrdev;
 static struct class *aaudio_class;
 
 static int aaudio_init_cmd(struct aaudio_device *a);
@@ -63,8 +61,7 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     aaudio->pci = dev;
     pci_set_drvdata(dev, aaudio);
 
-    aaudio->devt = aaudio_chrdev;
-    aaudio->dev = device_create(aaudio_class, &dev->dev, aaudio->devt, NULL, "aaudio");
+    aaudio->dev = device_create(aaudio_class, &dev->dev, MKDEV(0, 0), NULL, "aaudio");
     if (IS_ERR(aaudio->dev)) {
         status = PTR_ERR(aaudio->dev);
         aaudio->dev = NULL;
@@ -158,7 +155,7 @@ fail:
         if (!IS_ERR_OR_NULL(aaudio->reg_mem_cfg))
             pci_iounmap(dev, aaudio->reg_mem_cfg);
         if (aaudio->dev)
-            device_destroy(aaudio_class, aaudio->devt);
+            device_destroy(aaudio_class, MKDEV(0, 0));
         kfree(aaudio);
     }
 
@@ -186,7 +183,7 @@ static void aaudio_remove(struct pci_dev *dev)
     aaudio_bce_free(aaudio);
     pci_iounmap(dev, aaudio->reg_mem_bs);
     pci_iounmap(dev, aaudio->reg_mem_cfg);
-    device_destroy(aaudio_class, aaudio->devt);
+    device_destroy(aaudio_class, MKDEV(0, 0));
     pci_release_regions(dev);
     pci_disable_device(dev);
     kfree(aaudio);
@@ -769,36 +766,21 @@ static struct pci_driver aaudio_pci_driver = {
 int aaudio_module_init(void)
 {
     int result;
-    if ((result = alloc_chrdev_region(&aaudio_chrdev, 0, 1, "aaudio")))
-        return result;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
-    aaudio_class = class_create(THIS_MODULE, "aaudio");
-#else
     aaudio_class = class_create("aaudio");
-#endif
-    if (IS_ERR(aaudio_class)) {
-        result = PTR_ERR(aaudio_class);
-        goto fail_chrdev;
+    if (IS_ERR(aaudio_class))
+        return PTR_ERR(aaudio_class);
+
+    if ((result = pci_register_driver(&aaudio_pci_driver))) {
+        class_destroy(aaudio_class);
+        return result;
     }
-
-    if ((result = pci_register_driver(&aaudio_pci_driver)))
-        goto fail_class;
     return 0;
-
-fail_class:
-    class_destroy(aaudio_class);
-fail_chrdev:
-    unregister_chrdev_region(aaudio_chrdev, 1);
-    if (!result)
-        result = -EINVAL;
-    return result;
 }
 
 void aaudio_module_exit(void)
 {
     pci_unregister_driver(&aaudio_pci_driver);
     class_destroy(aaudio_class);
-    unregister_chrdev_region(aaudio_chrdev, 1);
 }
 
 struct aaudio_alsa_pcm_id_mapping aaudio_alsa_id_mappings[] = {

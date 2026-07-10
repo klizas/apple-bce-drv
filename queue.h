@@ -184,4 +184,4 @@ struct bce_queue_sq *bce_create_sq_with_flags(struct apple_bce_device *dev, stru
 void bce_destroy_cq(struct apple_bce_device *dev, struct bce_queue_cq *cq);
 void bce_destroy_sq(struct apple_bce_device *dev, struct bce_queue_sq *sq);
 
-#endif //BCEDRIVER_MAILBOX_H
+#endif //BCE_QUEUE_H

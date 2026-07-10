@@ -14,10 +14,8 @@ struct bce_vhci_device {
 };
 struct bce_vhci {
     struct apple_bce_device *dev;
-    dev_t vdevt;
     struct device *vdev;
     struct usb_hcd *hcd;
-    spinlock_t hcd_spinlock;
     struct bce_vhci_message_queue msg_commands;
     struct bce_vhci_message_queue msg_system;
     struct bce_vhci_message_queue msg_isochronous;
