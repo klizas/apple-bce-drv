@@ -85,14 +85,13 @@ struct aaudio_subdevice {
     struct aaudio_device *a;
     struct list_head list;
     aaudio_device_id_t dev_id;
-    /* Latest timestamp pair from the T2, consumed by ts_work. The PCM
-     * stream locks may not be taken in the BCE completion thread: a
-     * trigger holds them while waiting for its start/stop_io reply,
-     * which is delivered by that same thread. */
+    /* Receipt time of the latest timestamp message from the T2, consumed
+     * by ts_work. The PCM stream locks may not be taken in the BCE
+     * completion thread: a trigger holds them while waiting for its
+     * start/stop_io reply, which is delivered by that same thread. */
     struct work_struct ts_work;
     spinlock_t ts_lock;
     ktime_t ts_time_os;
-    u64 ts_dev_timestamp;
     u32 in_latency, out_latency;
     u8 buf_id;
     int alsa_id;

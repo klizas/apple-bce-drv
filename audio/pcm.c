@@ -426,7 +426,7 @@ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, 
     snd_pcm_period_elapsed(substream);
 }
 
-void aaudio_handle_timestamp(struct aaudio_subdevice *sdev, ktime_t os_timestamp, u64 dev_timestamp)
+void aaudio_handle_timestamp(struct aaudio_subdevice *sdev, ktime_t timestamp)
 {
     struct snd_pcm_substream *substream;
 
@@ -434,8 +434,8 @@ void aaudio_handle_timestamp(struct aaudio_subdevice *sdev, ktime_t os_timestamp
         return;
     substream = sdev->pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream;
     if (substream)
-        aaudio_handle_stream_timestamp(substream, dev_timestamp);
+        aaudio_handle_stream_timestamp(substream, timestamp);
     substream = sdev->pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream;
     if (substream)
-        aaudio_handle_stream_timestamp(substream, os_timestamp);
+        aaudio_handle_stream_timestamp(substream, timestamp);
 }

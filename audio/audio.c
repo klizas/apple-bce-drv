@@ -700,13 +700,11 @@ static void aaudio_ts_work(struct work_struct *ws)
 {
     struct aaudio_subdevice *sdev = container_of(ws, struct aaudio_subdevice, ts_work);
     ktime_t time_os;
-    u64 dev_timestamp;
 
     spin_lock(&sdev->ts_lock);
     time_os = sdev->ts_time_os;
-    dev_timestamp = sdev->ts_dev_timestamp;
     spin_unlock(&sdev->ts_lock);
-    aaudio_handle_timestamp(sdev, time_os, dev_timestamp);
+    aaudio_handle_timestamp(sdev, time_os);
 }
 
 void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg)
@@ -722,7 +720,6 @@ void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg
     if (sdev) {
         spin_lock(&sdev->ts_lock);
         sdev->ts_time_os = time_os;
-        sdev->ts_dev_timestamp = timestamp;
         spin_unlock(&sdev->ts_lock);
         schedule_work(&sdev->ts_work);
     }
