@@ -377,10 +377,9 @@ static void bce_vhci_free_device(struct usb_hcd *hcd, struct usb_device *udev)
         }
     }
     dev->tq_mask = 0;
-    /* Skip device_destroy when reenumerate_mask is set — bus_resume
-     * already handled T2-side teardown (either T2 reconnected and
-     * destroyed the old device itself, or we called device_destroy
-     * explicitly to force re-enumeration). */
+    /* Skip device_destroy when reenumerate_mask is set — the T2-side
+     * device was already destroyed when the port was marked (bus_resume
+     * or recovery), and the devid may have been reallocated since. */
     if (!test_bit(udev->portnum, &vhci->port_reenumerate_mask))
         bce_vhci_cmd_device_destroy(&vhci->cq, devid);
     kfree(dev);
@@ -647,10 +646,14 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
 
         status = bce_vhci_cmd_port_status(&vhci->cq, (u8) i, 0, &port_status);
         if (!status && (port_status & 0x40000)) {
-            /* T2 reconnected — old device already destroyed on T2 side.
-             * Clear the change bit and re-enumerate. */
+            /* T2 reconnected the device but keeps the old devid allocated
+             * until an explicit device_destroy; leaking it exhausts the
+             * 16-slot device table after a few suspend cycles. */
             pr_info("resume: port %d connection changed, re-enumerating\n", i);
             bce_vhci_cmd_port_status(&vhci->cq, (u8) i, 0x40000, &port_status);
+            status = bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+            if (status)
+                pr_warn("resume: port %d stale device_destroy failed (err=%d)\n", i, status);
             goto reenumerate;
         }
         if (status || !(port_status & 0x4)) {
@@ -993,9 +996,11 @@ static int bce_vhci_handle_firmware_event(struct bce_vhci *vhci, struct bce_vhci
 
     if (msg->cmd == BCE_VHCI_CMD_ENDPOINT_REQUEST_STATE) {
         if (msg->param2 == BCE_VHCI_ENDPOINT_ACTIVE) {
+            pr_info("firmware requested endpoint resume (dev=%d, ep=%02x)\n", devid, endp);
             bce_vhci_transfer_queue_resume(tq, BCE_VHCI_PAUSE_FIRMWARE);
             return BCE_VHCI_SUCCESS;
         } else if (msg->param2 == BCE_VHCI_ENDPOINT_PAUSED) {
+            pr_info("firmware requested endpoint pause (dev=%d, ep=%02x)\n", devid, endp);
             bce_vhci_transfer_queue_pause(tq, BCE_VHCI_PAUSE_FIRMWARE);
             return BCE_VHCI_SUCCESS;
         }
@@ -1280,6 +1285,9 @@ static void bce_vhci_recovery_w(struct work_struct *ws)
         if (!vhci->port_to_device[i])
             continue;
         pr_info("recovery: port %d signaling re-enumeration\n", i);
+        status = bce_vhci_cmd_device_destroy(&vhci->cq, vhci->port_to_device[i]);
+        if (status)
+            pr_warn("recovery: port %d stale device_destroy failed (err=%d)\n", i, status);
         set_bit(i, &vhci->port_reenumerate_mask);
         set_bit(i, &vhci->port_resume_mask);
     }
