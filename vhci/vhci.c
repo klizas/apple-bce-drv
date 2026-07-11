@@ -272,6 +272,8 @@ done_port_status:
             return 0;
         }
         if (wValue == USB_PORT_FEAT_SUSPEND) {
+            if (test_bit(wIndex, &vhci->port_reenumerate_mask))
+                return 0;
             pr_debug("Resuming port %i\n", wIndex);
             return bce_vhci_cmd_status_to_errno(bce_vhci_cmd_port_resume(&vhci->cq, (u8) wIndex));
         }
@@ -567,6 +569,20 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
     return 0;
 }
 
+/* T2 bulk transfer state does not survive S3 in place; only devices whose
+ * non-EP0 endpoints are all interrupt can resume from preserved state. */
+static bool bce_vhci_device_persistable(struct bce_vhci_device *vdev)
+{
+    int j;
+    for (j = 1; j < 32; j++) {
+        if (!(vdev->tq_mask & BIT(j)) || !vdev->tq[j].endp)
+            continue;
+        if (!usb_endpoint_xfer_int(&vdev->tq[j].endp->desc))
+            return false;
+    }
+    return true;
+}
+
 static int bce_vhci_bus_resume(struct usb_hcd *hcd)
 {
     static unsigned int resume_cycle;
@@ -620,8 +636,8 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
         bce_vhci_cmd_port_resume(&vhci->cq, i);
     }
 
-    /* Per-port classification: silent refresh + reset_resume for surviving
-     * devices, re-enumeration for reconnected/error ports. */
+    /* Per-port classification: in-place resume (or refresh + reset_resume)
+     * for surviving devices, re-enumeration for reconnected/error ports. */
     for (i = 0; i < 16; i++) {
         if (!vhci->port_to_device[i])
             continue;
@@ -629,15 +645,13 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
         devid = vhci->port_to_device[i];
         vdev = vhci->devices[devid];
 
-        bool connection_changed = false;
         status = bce_vhci_cmd_port_status(&vhci->cq, (u8) i, 0, &port_status);
         if (!status && (port_status & 0x40000)) {
             /* T2 reconnected — old device already destroyed on T2 side.
-             * Clear the change bit and fall through to the refresh path
-             * (same as surviving devices, but skip device_destroy). */
-            pr_info("resume: port %d connection changed, refreshing\n", i);
+             * Clear the change bit and re-enumerate. */
+            pr_info("resume: port %d connection changed, re-enumerating\n", i);
             bce_vhci_cmd_port_status(&vhci->cq, (u8) i, 0x40000, &port_status);
-            connection_changed = true;
+            goto reenumerate;
         }
         if (status || !(port_status & 0x4)) {
             /* Error querying port or device disconnected */
@@ -647,7 +661,29 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
             goto reenumerate;
         }
 
-        /* Inline refresh for surviving devices (not reconnected).
+        /* T2 preserves device state across S3; unpause endpoints and let
+         * USB core do a plain resume. If a device turns out dead,
+         * finish_port_resume() falls back to reset-resume on its own. */
+        if (bce_vhci_device_persistable(vdev)) {
+            for (j = 0; j < 32; j++) {
+                if (!(vdev->tq_mask & BIT(j)))
+                    continue;
+                status = bce_vhci_transfer_queue_resume(&vdev->tq[j], BCE_VHCI_PAUSE_SUSPEND);
+                if (status)
+                    break;
+            }
+            if (j == 32) {
+                pr_info("resume: port %d resumed in place (devid=%d, tq_mask=0x%x, port_status=0x%x)\n",
+                        i, devid, vdev->tq_mask, port_status);
+                continue;
+            }
+            pr_warn("resume: port %d endpoint %d unpause failed (err=%d), refreshing\n",
+                    i, j, status);
+        } else {
+            pr_info("resume: port %d has non-interrupt endpoints, refreshing\n", i);
+        }
+
+        /* Inline refresh for surviving devices.
          * Creating only EP0 matches boot-time state and prevents T2
          * from stalling on GET_DESCRIPTOR. USB core's reset_resume
          * sends SET_CONFIGURATION, then add_endpoint recreates
@@ -674,18 +710,12 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
         vhci->port_to_device[i] = 0;
 
         /* Destroy and recreate T2 device — port_reset required by T2
-         * before device_create will succeed.
-         * Skip destroy for reconnected devices: T2 already destroyed them.
-         * Forcing a destroy here when T2 already freed the id causes T2 to
-         * reuse the same devid on create, which leads to ~5s control-transfer
-         * stalls on busy multi-endpoint devices (e.g. keyboard/trackpad). */
-        if (!connection_changed) {
-            status = bce_vhci_cmd_device_destroy(&vhci->cq, devid);
-            if (status) {
-                pr_err("resume: port %d device_destroy failed (err=%d), falling back to re-enum\n", i, status);
-                kfree(vdev);
-                goto reenumerate;
-            }
+         * before device_create will succeed. */
+        status = bce_vhci_cmd_device_destroy(&vhci->cq, devid);
+        if (status) {
+            pr_err("resume: port %d device_destroy failed (err=%d), falling back to re-enum\n", i, status);
+            kfree(vdev);
+            goto reenumerate;
         }
         status = bce_vhci_cmd_port_reset(&vhci->cq, (u8) i, 0);
         if (status) {
@@ -736,7 +766,12 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
 
     reenumerate:
         /* Leave port_to_device/devices intact for free_device cleanup.
-         * free_device will skip device_destroy (reenumerate_mask set). */
+         * free_device will skip device_destroy (reenumerate_mask set).
+         * Clear persist_enabled so usb_port_resume doesn't burn 2s in
+         * wait_for_connected() on the hidden connection. */
+        udev = usb_hub_find_child(hcd->self.root_hub, i);
+        if (udev)
+            udev->persist_enabled = 0;
         set_bit(i, &vhci->port_reenumerate_mask);
         set_bit(i, &vhci->port_resume_mask);
         need_poll = 1;
