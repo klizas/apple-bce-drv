@@ -490,12 +490,26 @@ static const struct pci_device_id apple_bce_ids[  ] = {
 
 MODULE_DEVICE_TABLE(pci, apple_bce_ids);
 
+static void apple_bce_shutdown(struct pci_dev *dev)
+{
+    struct apple_bce_device *bce = pci_get_drvdata(dev);
+
+    if (!bce)
+        return;
+    bce->is_being_removed = true;
+    WRITE_ONCE(bce->vhci.controller_dead, true);
+    cancel_work_sync(&bce->vhci.w_recovery);
+    bce_vhci_stop(bce->vhci.hcd);
+    bce_timestamp_stop(&bce->timestamp);
+}
+
 static SIMPLE_DEV_PM_OPS(apple_bce_pci_driver_pm, apple_bce_suspend, apple_bce_resume);
 static struct pci_driver apple_bce_pci_driver = {
         .name = "apple-bce",
         .id_table = apple_bce_ids,
         .probe = apple_bce_probe,
         .remove = apple_bce_remove,
+        .shutdown = apple_bce_shutdown,
         .driver = {
                 .pm = &apple_bce_pci_driver_pm
         }

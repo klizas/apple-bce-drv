@@ -189,9 +189,8 @@ static void aaudio_remove(struct pci_dev *dev)
     kfree(aaudio);
 }
 
-static int aaudio_suspend(struct device *dev)
+static void aaudio_quiesce(struct aaudio_device *aaudio, bool suspend_pcm)
 {
-    struct aaudio_device *aaudio = pci_get_drvdata(to_pci_dev(dev));
     struct aaudio_subdevice *sdev;
     size_t i;
 
@@ -215,15 +214,30 @@ static int aaudio_suspend(struct device *dev)
         }
         if (stopped_io)
             aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
-        if (sdev->pcm)
+        if (suspend_pcm && sdev->pcm)
             snd_pcm_suspend_all(sdev->pcm);
     }
 
     if (aaudio_cmd_set_remote_access(aaudio, AAUDIO_REMOTE_ACCESS_OFF))
         dev_warn(aaudio->dev, "Failed to reset remote access\n");
+}
 
+static int aaudio_suspend(struct device *dev)
+{
+    struct aaudio_device *aaudio = pci_get_drvdata(to_pci_dev(dev));
+
+    aaudio_quiesce(aaudio, true);
     pci_disable_device(aaudio->pci);
     return 0;
+}
+
+static void aaudio_shutdown(struct pci_dev *dev)
+{
+    struct aaudio_device *aaudio = pci_get_drvdata(dev);
+
+    if (!aaudio)
+        return;
+    aaudio_quiesce(aaudio, false);
 }
 
 static int aaudio_resume(struct device *dev)
@@ -754,6 +768,7 @@ static struct pci_driver aaudio_pci_driver = {
         .id_table = aaudio_ids,
         .probe = aaudio_probe,
         .remove = aaudio_remove,
+        .shutdown = aaudio_shutdown,
         .driver = {
                 .pm = &aaudio_pci_driver_pm
         }
