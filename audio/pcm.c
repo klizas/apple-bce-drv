@@ -85,6 +85,7 @@ int aaudio_create_hw_info(struct aaudio_apple_description *desc, struct snd_pcm_
     alsa_hw->info = (SNDRV_PCM_INFO_MMAP |
                      SNDRV_PCM_INFO_BLOCK_TRANSFER |
                      SNDRV_PCM_INFO_MMAP_VALID |
+                     SNDRV_PCM_INFO_NO_PERIOD_WAKEUP |
                      SNDRV_PCM_INFO_DOUBLE);
     if (desc->format_flags & AAUDIO_FORMAT_FLAG_NON_MIXABLE)
         pr_warn("unsupported hw flag: NON_MIXABLE\n");
@@ -272,8 +273,9 @@ static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
         case SNDRV_PCM_TRIGGER_START:
             aaudio_pcm_start(substream);
             stream->started = 1;
-            hrtimer_start(&stream->period_timer, ns_to_ktime(stream->period_time_ns),
-                          HRTIMER_MODE_REL);
+            if (!substream->runtime->no_period_wakeup)
+                hrtimer_start(&stream->period_timer, ns_to_ktime(stream->period_time_ns),
+                              HRTIMER_MODE_REL);
             break;
         case SNDRV_PCM_TRIGGER_STOP:
             aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
