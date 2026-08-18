@@ -202,8 +202,13 @@ void bce_vhci_transfer_queue_event(struct bce_vhci_transfer_queue *q, struct bce
      * Suspend/resume fix: Skip events on inactive queues. During pause/unbind,
      * the T2 chip may still send events for endpoints being torn down.
      */
-    if (!q->active)
+    if (!q->active) {
+        /* Keep the EP0 setup request the T2 may issue while we pause for a cancel/reset. */
+        if (msg->cmd == BCE_VHCI_CMD_TRANSFER_REQUEST && q->endp_addr == 0 &&
+            (READ_ONCE(q->paused_by) & BCE_VHCI_PAUSE_INTERNAL_WQ))
+            bce_vhci_transfer_queue_defer_event(q, msg);
         goto complete;
+    }
 
     bce_vhci_transfer_queue_deliver_pending(q);
 
@@ -213,7 +218,10 @@ void bce_vhci_transfer_queue_event(struct bce_vhci_transfer_queue *q, struct bce
         goto complete;
     }
     if (list_empty(&q->endp->urb_list)) {
-        pr_err("[%02x] Unexpected transfer queue event\n", q->endp_addr);
+        if (msg->cmd == BCE_VHCI_CMD_CONTROL_TRANSFER_STATUS)
+            pr_debug("[00] status for a cancelled control transfer\n");
+        else
+            pr_err("[%02x] Unexpected transfer queue event\n", q->endp_addr);
         goto complete;
     }
     urb = list_first_entry(&q->endp->urb_list, struct urb, urb_list);
@@ -268,7 +276,9 @@ static void bce_vhci_transfer_queue_completion(struct bce_queue_sq *sq)
             bce_notify_submission_complete(sq);
             continue;
         }
-        if (list_empty(&q->endp->urb_list)) {
+        if (list_empty(&q->endp->urb_list) ||
+            ((struct bce_vhci_urb *) list_first_entry(&q->endp->urb_list, struct urb, urb_list)->hcpriv)->state ==
+                BCE_VHCI_URB_INIT_PENDING) {
             /* Expected during teardown: URB was cancelled and unlinked from
              * endp->urb_list, but T2's in-flight DMA completion arrived after.
              * The completion slot is properly consumed below. */
@@ -566,6 +576,7 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
     unsigned long flags;
     int ret;
     enum bce_vhci_urb_state old_state;
+    bool control_flush = false;
 
     spin_lock_irqsave(&q->urb_lock, flags);
     if ((ret = usb_hcd_check_unlink_urb(q->vhci->hcd, urb, status))) {
@@ -587,7 +598,10 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
 
     /* Free the active request slot so new URBs can use it. */
     if (old_state != BCE_VHCI_URB_INIT_PENDING) {
-        if (old_state == BCE_VHCI_URB_WAITING_FOR_COMPLETION && !vurb->is_control) {
+        if (vurb->is_control) {
+            /* T2 may still own the setup/data DMA; abort it via w_flush before giveback. */
+            control_flush = true;
+        } else if (old_state == BCE_VHCI_URB_WAITING_FOR_COMPLETION) {
             /* Active data transfer: T2 has a pending
              * TRANSFER_REQUEST + DMA in its pipeline.
              * Don't free the slot yet — let the ghost completion
@@ -613,7 +627,8 @@ int bce_vhci_urb_request_cancel(struct bce_vhci_transfer_queue *q, struct urb *u
      * usb_kill_urb callers block until the flush completes.  This only
      * fires during teardown (STREAMOFF) — during normal streaming, new
      * URBs keep the list non-empty. */
-    if ((q->ghost_in_count > 0 || q->ghost_out_count > 0) && list_empty(&q->endp->urb_list)) {
+    if (control_flush ||
+        ((q->ghost_in_count > 0 || q->ghost_out_count > 0) && list_empty(&q->endp->urb_list))) {
         urb->status = status;
         list_add_tail(&urb->urb_list, &q->flush_giveback_list);
         spin_unlock_irqrestore(&q->urb_lock, flags);
@@ -635,6 +650,9 @@ static void bce_vhci_transfer_queue_flush_w(struct work_struct *work)
     unsigned long flags;
 
     bce_vhci_transfer_queue_pause(q, BCE_VHCI_PAUSE_INTERNAL_WQ);
+    /* Pause alone leaves the T2 waiting on the half-done EP0 transaction; reset it too. */
+    if (q->endp_addr == 0)
+        bce_vhci_cmd_endpoint_reset(&q->vhci->cq, q->dev_addr, 0);
     spin_lock_irqsave(&q->urb_lock, flags);
     q->ghost_in_count = 0;
     q->ghost_out_count = 0;
