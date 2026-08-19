@@ -328,7 +328,7 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
     spin_lock_init(&sdev->ts_lock);
     sdev->dev_id = dev_id;
     sdev->buf_id = AAUDIO_BUFFER_ID_NONE;
-    strncpy(sdev->uid, uid, uid_len);
+    memcpy(sdev->uid, uid, uid_len);
     sdev->uid[uid_len] = '\0';
 
     if (aaudio_cmd_get_primitive_property(a, dev_id, dev_id,
