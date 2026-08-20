@@ -907,7 +907,8 @@ static int bce_vhci_urb_control_transfer_completion(struct bce_vhci_urb *urb, st
             bce_vhci_urb_complete(urb, status);
             return -ENOENT;
         }
-        return 0;
+        /* The status event may have arrived before this completion. */
+        return bce_vhci_urb_control_check_status(urb);
     } else if (urb->state == BCE_VHCI_URB_WAITING_FOR_TRANSFER_REQUEST ||
                urb->state == BCE_VHCI_URB_WAITING_FOR_COMPLETION) {
         if ((status = bce_vhci_urb_data_transfer_completion(urb, c)))
