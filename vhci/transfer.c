@@ -836,11 +836,21 @@ static int bce_vhci_urb_control_check_status(struct bce_vhci_urb *urb)
         if (urb->received_status != BCE_VHCI_SUCCESS) {
             if (urb->is_control && urb->urb->setup_packet) {
                 struct usb_ctrlrequest *setup = (struct usb_ctrlrequest *)urb->urb->setup_packet;
-                pr_err("[%02x] URB failed: %x (dev=%d) setup=%02x/%02x val=%04x idx=%04x len=%04x\n",
-                       urb->q->endp_addr, urb->received_status, urb->q->dev_addr,
-                       setup->bRequestType, setup->bRequest,
-                       le16_to_cpu(setup->wValue), le16_to_cpu(setup->wIndex),
-                       le16_to_cpu(setup->wLength));
+                if (urb->received_status == BCE_VHCI_USB_PIPE_STALL)
+                    pr_debug("[%02x] URB stalled (dev=%d) setup=%02x/%02x val=%04x idx=%04x len=%04x\n",
+                             urb->q->endp_addr, urb->q->dev_addr,
+                             setup->bRequestType, setup->bRequest,
+                             le16_to_cpu(setup->wValue), le16_to_cpu(setup->wIndex),
+                             le16_to_cpu(setup->wLength));
+                else
+                    pr_err("[%02x] URB failed: %x (dev=%d) setup=%02x/%02x val=%04x idx=%04x len=%04x\n",
+                           urb->q->endp_addr, urb->received_status, urb->q->dev_addr,
+                           setup->bRequestType, setup->bRequest,
+                           le16_to_cpu(setup->wValue), le16_to_cpu(setup->wIndex),
+                           le16_to_cpu(setup->wLength));
+            } else if (urb->received_status == BCE_VHCI_USB_PIPE_STALL) {
+                pr_debug("[%02x] URB stalled (dev=%d)\n",
+                         urb->q->endp_addr, urb->q->dev_addr);
             } else {
                 pr_err("[%02x] URB failed: %x (dev=%d)\n",
                        urb->q->endp_addr, urb->received_status, urb->q->dev_addr);
