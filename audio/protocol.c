@@ -1,3 +1,6 @@
+#define pr_fmt(fmt) "aaudio: " fmt
+
+#include <linux/printk.h>
 #include "protocol.h"
 #include "protocol_bce.h"
 #include "audio.h"
@@ -10,10 +13,34 @@ int aaudio_msg_read_base(struct aaudio_msg *msg, struct aaudio_msg_base *base)
     return 0;
 }
 
-#define READ_START(type) \
-    size_t offset = sizeof(struct aaudio_msg_header) + sizeof(struct aaudio_msg_base); (void)offset; \
-    if (((struct aaudio_msg_base *) ((struct aaudio_msg_header *) msg->data + 1))->msg != type) \
+/* The T2 answers SetRemoteAccess with status 6 on a cold boot. Only the
+ * property readers carry a status worth acting on. */
+static int aaudio_msg_verify(struct aaudio_msg *msg, u32 type, bool fatal_status)
+{
+    struct aaudio_msg_base *base;
+
+    if (msg->size < sizeof(struct aaudio_msg_header) + sizeof(struct aaudio_msg_base))
         return -EINVAL;
+    base = (struct aaudio_msg_base *) ((struct aaudio_msg_header *) msg->data + 1);
+    if (base->msg != type)
+        return -EINVAL;
+    if (!base->status)
+        return 0;
+    if (fatal_status)
+        return base->status == AAUDIO_STATUS_UNSUPPORTED ? -EOPNOTSUPP : -EREMOTEIO;
+    pr_warn_ratelimited("message %u returned status %u\n", type, base->status);
+    return 0;
+}
+
+#define READ_START_COMMON(type, fatal_status) \
+    size_t offset = sizeof(struct aaudio_msg_header) + sizeof(struct aaudio_msg_base); (void)offset; \
+    { \
+        int verify = aaudio_msg_verify(msg, type, fatal_status); \
+        if (verify) \
+            return verify; \
+    }
+#define READ_START(type) READ_START_COMMON(type, false)
+#define READ_START_STATUS(type) READ_START_COMMON(type, true)
 #define READ_DEVID_VAR(devid) *devid = ((struct aaudio_msg_header *) msg->data)->device_id
 #define READ_VAL(type) ({ offset += sizeof(type); *((type *) ((u8 *) msg->data + offset - sizeof(type))); })
 #define READ_VAR(type, var) *var = READ_VAL(type)
@@ -43,7 +70,7 @@ int aaudio_msg_read_update_timestamp(struct aaudio_msg *msg, aaudio_device_id_t 
 int aaudio_msg_read_get_property_response(struct aaudio_msg *msg, aaudio_object_id_t *obj,
         struct aaudio_prop_addr *prop, void **data, u64 *data_size)
 {
-    READ_START(AAUDIO_MSG_GET_PROPERTY_RESPONSE);
+    READ_START_STATUS(AAUDIO_MSG_GET_PROPERTY_RESPONSE);
     READ_VAR(aaudio_object_id_t, obj);
     READ_VAR(u32, &prop->element);
     READ_VAR(u32, &prop->scope);
@@ -56,7 +83,7 @@ int aaudio_msg_read_get_property_response(struct aaudio_msg *msg, aaudio_object_
 
 int aaudio_msg_read_set_property_response(struct aaudio_msg *msg, aaudio_object_id_t *obj)
 {
-    READ_START(AAUDIO_MSG_SET_PROPERTY_RESPONSE);
+    READ_START_STATUS(AAUDIO_MSG_SET_PROPERTY_RESPONSE);
     READ_VAR(aaudio_object_id_t, obj);
     return 0;
 }
@@ -105,6 +132,40 @@ int aaudio_msg_read_get_output_stream_list_response(struct aaudio_msg *msg, aaud
     READ_VAR(u64, str_cnt);
     *str_l = (aaudio_device_id_t *) ((u8 *) msg->data + offset);
     /* offset += str_cnt * sizeof(aaudio_object_id_t); */
+    return 0;
+}
+
+/* Three parallel length-prefixed u64 arrays: control ids, element ids, scope
+ * ids. bridgeaudiod rejects the message unless all three counts are equal. */
+int aaudio_msg_read_get_control_list_response(struct aaudio_msg *msg, aaudio_object_id_t **ctrl_l,
+        u64 **elem_l, u64 **scope_l, u64 *ctrl_cnt)
+{
+    u64 cnt, n;
+    size_t need;
+    READ_START(AAUDIO_MSG_GET_CONTROL_LIST_RESPONSE);
+    if (msg->size < offset + sizeof(u64))
+        return -EINVAL;
+    READ_VAR(u64, &cnt);
+    if (cnt > (SIZE_MAX - 2 * sizeof(u64)) / (3 * sizeof(u64)))
+        return -EINVAL;
+    need = (size_t) cnt * 3 * sizeof(u64) + 2 * sizeof(u64);
+    if (msg->size - offset < need)
+        return -EINVAL;
+
+    *ctrl_l = (aaudio_object_id_t *) ((u8 *) msg->data + offset);
+    offset += cnt * sizeof(aaudio_object_id_t);
+    READ_VAR(u64, &n);
+    if (n != cnt)
+        return -EINVAL;
+    *elem_l = (u64 *) ((u8 *) msg->data + offset);
+    offset += cnt * sizeof(u64);
+    READ_VAR(u64, &n);
+    if (n != cnt)
+        return -EINVAL;
+    *scope_l = (u64 *) ((u8 *) msg->data + offset);
+    offset += cnt * sizeof(u64);
+
+    *ctrl_cnt = cnt;
     return 0;
 }
 
@@ -209,6 +270,13 @@ void aaudio_msg_write_get_output_stream_list(struct aaudio_msg *msg, aaudio_devi
 {
     WRITE_START_COMMAND(devid);
     WRITE_BASE(AAUDIO_MSG_GET_OUTPUT_STREAM_LIST);
+    WRITE_END();
+}
+
+void aaudio_msg_write_get_control_list(struct aaudio_msg *msg, aaudio_device_id_t devid)
+{
+    WRITE_START_COMMAND(devid);
+    WRITE_BASE(AAUDIO_MSG_GET_CONTROL_LIST);
     WRITE_END();
 }
 
@@ -340,6 +408,12 @@ int aaudio_cmd_get_output_stream_list(struct aaudio_device *a, struct aaudio_msg
 {
     CMD_DEF_SHARED_NO_REPLY_AND_SEND(aaudio_msg_write_get_output_stream_list, devid);
     CMD_HNDL_REPLY_NO_FREE(aaudio_msg_read_get_output_stream_list_response, str_l, str_cnt);
+}
+int aaudio_cmd_get_control_list(struct aaudio_device *a, struct aaudio_msg *buf, aaudio_device_id_t devid,
+        aaudio_object_id_t **ctrl_l, u64 **elem_l, u64 **scope_l, u64 *ctrl_cnt)
+{
+    CMD_DEF_SHARED_NO_REPLY_AND_SEND(aaudio_msg_write_get_control_list, devid);
+    CMD_HNDL_REPLY_NO_FREE(aaudio_msg_read_get_control_list_response, ctrl_l, elem_l, scope_l, ctrl_cnt);
 }
 int aaudio_cmd_set_remote_access(struct aaudio_device *a, u64 mode)
 {

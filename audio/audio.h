@@ -16,6 +16,7 @@
 #define AAUDIO_DEVICE_MAX_BUFFER_COUNT 1
 
 #define AAUDIO_BUFFER_ID_NONE 0xffu
+#define AAUDIO_DEVICE_MAX_CONTROLS 32
 
 struct snd_card;
 struct snd_pcm;
@@ -81,6 +82,17 @@ struct aaudio_stream {
     struct snd_pcm_substream *pcm_substream;
     u64 period_time_ns;
 };
+
+struct aaudio_control {
+    struct aaudio_subdevice *sdev;
+    aaudio_object_id_t id;
+    u32 class_id;
+    u32 scope;
+    u32 element;
+    s32 min_milli;
+    s32 max_milli;
+};
+
 struct aaudio_subdevice {
     struct aaudio_device *a;
     struct list_head list;
@@ -103,6 +115,8 @@ struct aaudio_subdevice {
     bool is_pcm;
     struct snd_pcm *pcm;
     struct snd_jack *jack;
+    size_t control_cnt;
+    struct aaudio_control controls[AAUDIO_DEVICE_MAX_CONTROLS];
 };
 struct aaudio_alsa_pcm_id_mapping {
     const char *name;

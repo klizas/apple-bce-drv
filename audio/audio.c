@@ -8,6 +8,9 @@
 #include <sound/initval.h>
 #include <sound/pcm.h>
 #include <sound/jack.h>
+#include <sound/control.h>
+#include <sound/tlv.h>
+#include <linux/math64.h>
 #include "audio.h"
 #include "pcm.h"
 
@@ -302,6 +305,7 @@ static int aaudio_init_cmd(struct aaudio_device *a)
 
 static void aaudio_init_stream_info(struct aaudio_subdevice *sdev, struct aaudio_stream *strm);
 static void aaudio_handle_jack_connection_change(struct aaudio_subdevice *sdev);
+static void aaudio_init_controls(struct aaudio_subdevice *sdev);
 
 static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
 {
@@ -372,6 +376,8 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
         sdev->out_streams[i].latency += sdev->out_latency;
     }
 
+    aaudio_init_controls(sdev);
+
     if (sdev->is_pcm)
         aaudio_create_pcm(sdev);
     /* Headphone Jack status */
@@ -391,6 +397,268 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
 fail:
     aaudio_reply_free(&buf);
     kfree(sdev);
+}
+
+/* Thousandths, because the kernel cannot print a float. */
+static s64 aaudio_f32_milli(u32 bits)
+{
+    int exp = (int) ((bits >> 23) & 0xff);
+    s64 m = (s64) ((bits & 0x7fffffu) | 0x800000u) * 1000;
+    int shift;
+
+    if (!exp)
+        return 0;
+    shift = 23 - (exp - 127);
+    if (shift >= 0) {
+        if (shift > 62)
+            return 0;
+        m >>= shift;
+    } else {
+        if (shift < -29)
+            return 0;
+        m <<= -shift;
+    }
+    return (bits & 0x80000000u) ? -m : m;
+}
+
+#define AAUDIO_CTL_DB_STEP_MILLI 500
+
+static s64 aaudio_f64_milli(u64 bits)
+{
+    int exp = (int) ((bits >> 52) & 0x7ff);
+    u64 frac = (bits & ((1ULL << 52) - 1)) | (1ULL << 52);
+    int shift;
+    s64 m;
+
+    if (!exp)
+        return 0;
+    shift = 52 - (exp - 1023);
+    if (shift < 0 || shift > 62)
+        return 0;
+    m = (s64) ((frac * 1000) >> shift);
+    return (bits >> 63) ? -m : m;
+}
+
+static u32 aaudio_f32_from_milli(s64 milli)
+{
+    u32 sign = 0;
+    u64 q;
+    int e;
+
+    if (!milli)
+        return 0;
+    if (milli < 0) {
+        sign = 0x80000000u;
+        milli = -milli;
+    }
+    q = div_u64((u64) milli << 23, 1000);
+    if (!q)
+        return 0;
+    e = fls64(q) - 1;
+    if (e > 23)
+        q >>= e - 23;
+    else
+        q <<= 23 - e;
+    return sign | ((u32) (e - 23 + 127) << 23) | ((u32) q & 0x7fffffu);
+}
+
+static int aaudio_ctl_get_u32(struct aaudio_control *c, u32 selector, u32 *out)
+{
+    return aaudio_cmd_get_primitive_property(c->sdev->a, c->sdev->dev_id, c->id,
+            AAUDIO_PROP(AAUDIO_PROP_SCOPE_GLOBAL, selector, 0), NULL, 0, out, sizeof(*out));
+}
+
+static int aaudio_ctl_set_u32(struct aaudio_control *c, u32 selector, u32 value)
+{
+    return aaudio_cmd_set_property(c->sdev->a, c->sdev->dev_id, c->id,
+            AAUDIO_PROP(AAUDIO_PROP_SCOPE_GLOBAL, selector, 0), NULL, 0, &value, sizeof(value));
+}
+
+static int aaudio_ctl_volume_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *ui)
+{
+    struct aaudio_control *c = (struct aaudio_control *) kc->private_value;
+
+    ui->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+    ui->count = 1;
+    ui->value.integer.min = 0;
+    ui->value.integer.max = (c->max_milli - c->min_milli) / AAUDIO_CTL_DB_STEP_MILLI;
+    return 0;
+}
+
+static int aaudio_ctl_volume_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uv)
+{
+    struct aaudio_control *c = (struct aaudio_control *) kc->private_value;
+    s64 milli;
+    u32 raw;
+    int status;
+
+    status = aaudio_ctl_get_u32(c, AAUDIO_PROP_LEVEL_DB, &raw);
+    if (status)
+        return status;
+    milli = clamp_t(s64, aaudio_f32_milli(raw), c->min_milli, c->max_milli);
+    uv->value.integer.value[0] = div_s64(milli - c->min_milli, AAUDIO_CTL_DB_STEP_MILLI);
+    return 0;
+}
+
+static int aaudio_ctl_volume_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uv)
+{
+    struct aaudio_control *c = (struct aaudio_control *) kc->private_value;
+    long v = uv->value.integer.value[0];
+    s64 milli;
+    int status;
+
+    if (v < 0 || v > (c->max_milli - c->min_milli) / AAUDIO_CTL_DB_STEP_MILLI)
+        return -EINVAL;
+    milli = c->min_milli + v * AAUDIO_CTL_DB_STEP_MILLI;
+    status = aaudio_ctl_set_u32(c, AAUDIO_PROP_LEVEL_DB, aaudio_f32_from_milli(milli));
+    return status ? status : 1;
+}
+
+static int aaudio_ctl_volume_tlv(struct snd_kcontrol *kc, int op_flag, unsigned int size,
+        unsigned int __user *tlv)
+{
+    struct aaudio_control *c = (struct aaudio_control *) kc->private_value;
+    unsigned int t[4];
+
+    if (op_flag != SNDRV_CTL_TLV_OP_READ)
+        return -ENXIO;
+    if (size < sizeof(t))
+        return -ENOMEM;
+    t[0] = SNDRV_CTL_TLVT_DB_SCALE;
+    t[1] = 2 * sizeof(unsigned int);
+    t[2] = (unsigned int) (c->min_milli / 10);
+    t[3] = AAUDIO_CTL_DB_STEP_MILLI / 10;
+    if (copy_to_user(tlv, t, sizeof(t)))
+        return -EFAULT;
+    return 0;
+}
+
+static int aaudio_ctl_switch_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *ui)
+{
+    ui->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
+    ui->count = 1;
+    ui->value.integer.min = 0;
+    ui->value.integer.max = 1;
+    return 0;
+}
+
+static int aaudio_ctl_switch_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uv)
+{
+    struct aaudio_control *c = (struct aaudio_control *) kc->private_value;
+    u32 muted;
+    int status;
+
+    status = aaudio_ctl_get_u32(c, AAUDIO_PROP_BOOL_VALUE, &muted);
+    if (status)
+        return status;
+    uv->value.integer.value[0] = !muted;
+    return 0;
+}
+
+static int aaudio_ctl_switch_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uv)
+{
+    struct aaudio_control *c = (struct aaudio_control *) kc->private_value;
+    int status;
+
+    status = aaudio_ctl_set_u32(c, AAUDIO_PROP_BOOL_VALUE, !uv->value.integer.value[0]);
+    return status ? status : 1;
+}
+
+static const char *aaudio_ctl_prefix(struct aaudio_subdevice *sdev, u32 scope)
+{
+    if (!strcmp(sdev->uid, "Codec Output"))
+        return scope == AAUDIO_PROP_SCOPE_INPUT ? "Mic" : "Headphone";
+    return sdev->uid;
+}
+
+static void aaudio_add_control(struct aaudio_control *c)
+{
+    struct aaudio_subdevice *sdev = c->sdev;
+    struct snd_kcontrol_new t = { .iface = SNDRV_CTL_ELEM_IFACE_MIXER };
+    char name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
+    struct snd_kcontrol *kc;
+    int status;
+
+    snprintf(name, sizeof(name), "%s %s %s", aaudio_ctl_prefix(sdev, c->scope),
+            c->scope == AAUDIO_PROP_SCOPE_INPUT ? "Capture" : "Playback",
+            c->class_id == AAUDIO_CLASS_VOLUME ? "Volume" : "Switch");
+    t.name = name;
+
+    if (c->class_id == AAUDIO_CLASS_VOLUME) {
+        if (c->max_milli <= c->min_milli)
+            return;
+        t.info = aaudio_ctl_volume_info;
+        t.get = aaudio_ctl_volume_get;
+        t.put = aaudio_ctl_volume_put;
+        t.tlv.c = aaudio_ctl_volume_tlv;
+        t.access = SNDRV_CTL_ELEM_ACCESS_READWRITE | SNDRV_CTL_ELEM_ACCESS_TLV_READ |
+                SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK;
+    } else {
+        t.info = aaudio_ctl_switch_info;
+        t.get = aaudio_ctl_switch_get;
+        t.put = aaudio_ctl_switch_put;
+        t.access = SNDRV_CTL_ELEM_ACCESS_READWRITE;
+    }
+    t.private_value = (unsigned long) c;
+
+    kc = snd_ctl_new1(&t, sdev);
+    if (!kc)
+        return;
+    status = snd_ctl_add(sdev->a->card, kc);
+    if (status) {
+        dev_warn(sdev->a->dev, "Failed to add control \"%s\" (%d)\n", name, status);
+        return;
+    }
+    dev_info(sdev->a->dev, "Added control \"%s\" for object 0x%llx\n", name, (u64) c->id);
+}
+
+static void aaudio_init_controls(struct aaudio_subdevice *sdev)
+{
+    struct aaudio_device *a = sdev->a;
+    struct aaudio_msg buf = aaudio_reply_alloc();
+    aaudio_object_id_t *ctrl_l;
+    u64 *elem_l, *scope_l, cnt, i;
+    int status;
+
+    if (!buf.data)
+        return;
+
+    status = aaudio_cmd_get_control_list(a, &buf, sdev->dev_id, &ctrl_l, &elem_l, &scope_l, &cnt);
+    if (status) {
+        dev_warn(a->dev, "Failed to get control list for %s (%d)\n", sdev->uid, status);
+        goto out;
+    }
+
+    for (i = 0; i < cnt && sdev->control_cnt < AAUDIO_DEVICE_MAX_CONTROLS; i++) {
+        struct aaudio_control *c = &sdev->controls[sdev->control_cnt];
+        u64 range[2];
+
+        c->sdev = sdev;
+        c->id = ctrl_l[i];
+        c->scope = (u32) scope_l[i];
+        c->element = (u32) elem_l[i];
+        if (aaudio_cmd_get_primitive_property(a, sdev->dev_id, c->id,
+                AAUDIO_PROP(AAUDIO_PROP_SCOPE_GLOBAL, AAUDIO_PROP_CLASS, 0), NULL, 0,
+                &c->class_id, sizeof(c->class_id)))
+            continue;
+
+        if (c->class_id == AAUDIO_CLASS_VOLUME) {
+            if (aaudio_cmd_get_primitive_property(a, sdev->dev_id, c->id,
+                    AAUDIO_PROP(AAUDIO_PROP_SCOPE_GLOBAL, AAUDIO_PROP_LEVEL_DB_RANGE, 0), NULL, 0,
+                    range, sizeof(range)))
+                continue;
+            c->min_milli = (s32) aaudio_f64_milli(range[0]);
+            c->max_milli = (s32) aaudio_f64_milli(range[1]);
+        } else if (c->class_id != AAUDIO_CLASS_MUTE) {
+            continue;
+        }
+
+        sdev->control_cnt++;
+        aaudio_add_control(c);
+    }
+
+out:
+    aaudio_reply_free(&buf);
 }
 
 static void aaudio_init_stream_info(struct aaudio_subdevice *sdev, struct aaudio_stream *strm)

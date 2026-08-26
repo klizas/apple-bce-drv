@@ -31,6 +31,10 @@ struct aaudio_prop_addr {
 #define AAUDIO_PROP(scope, sel, el) (struct aaudio_prop_addr) { scope, sel, el }
 
 enum {
+    AAUDIO_STATUS_UNSUPPORTED = 4
+};
+
+enum {
     AAUDIO_MSG_TYPE_COMMAND = 1,
     AAUDIO_MSG_TYPE_RESPONSE = 2,
     AAUDIO_MSG_TYPE_NOTIFICATION = 3
@@ -55,6 +59,8 @@ enum {
     AAUDIO_MSG_GET_INPUT_STREAM_LIST_RESPONSE = 25,
     AAUDIO_MSG_GET_OUTPUT_STREAM_LIST = 26,
     AAUDIO_MSG_GET_OUTPUT_STREAM_LIST_RESPONSE = 27,
+    AAUDIO_MSG_GET_CONTROL_LIST = 28,
+    AAUDIO_MSG_GET_CONTROL_LIST_RESPONSE = 29,
     AAUDIO_MSG_SET_REMOTE_ACCESS = 32,
     AAUDIO_MSG_SET_REMOTE_ACCESS_RESPONSE = 33,
     AAUDIO_MSG_UPDATE_TIMESTAMP_RESPONSE = 34,
@@ -71,6 +77,11 @@ enum {
 };
 
 enum {
+    AAUDIO_CLASS_VOLUME = 0x766c6d65, // 'vlme'
+    AAUDIO_CLASS_MUTE   = 0x6d757465  // 'mute'
+};
+
+enum {
     AAUDIO_PROP_SCOPE_GLOBAL = 0x676c6f62, // 'glob'
     AAUDIO_PROP_SCOPE_INPUT  = 0x696e7074, // 'inpt'
     AAUDIO_PROP_SCOPE_OUTPUT = 0x6f757470  // 'outp'
@@ -82,7 +93,10 @@ enum {
     AAUDIO_PROP_JACK_PLUGGED = 0x6a61636b, // 'jack'
     AAUDIO_PROP_SEL_VOLUME   = 0x64656176, // 'deav'
     AAUDIO_PROP_LATENCY      = 0x6c746e63, // 'ltnc'
-    AAUDIO_PROP_PHYS_FORMAT  = 0x70667420  // 'pft '
+    AAUDIO_PROP_PHYS_FORMAT  = 0x70667420, // 'pft '
+    AAUDIO_PROP_CLASS        = 0x636c6173, // 'clas'
+    AAUDIO_PROP_LEVEL_DB     = 0x6c636476, // 'lcdv'
+    AAUDIO_PROP_LEVEL_DB_RANGE = 0x6c636472 // 'lcdr'
 };
 
 int aaudio_msg_read_base(struct aaudio_msg *msg, struct aaudio_msg_base *base);
@@ -101,6 +115,8 @@ int aaudio_msg_read_property_changed(struct aaudio_msg *msg, aaudio_device_id_t 
 int aaudio_msg_read_set_input_stream_address_ranges_response(struct aaudio_msg *msg);
 int aaudio_msg_read_get_input_stream_list_response(struct aaudio_msg *msg, aaudio_object_id_t **str_l, u64 *str_cnt);
 int aaudio_msg_read_get_output_stream_list_response(struct aaudio_msg *msg, aaudio_object_id_t **str_l, u64 *str_cnt);
+int aaudio_msg_read_get_control_list_response(struct aaudio_msg *msg, aaudio_object_id_t **ctrl_l,
+        u64 **elem_l, u64 **scope_l, u64 *ctrl_cnt);
 int aaudio_msg_read_set_remote_access_response(struct aaudio_msg *msg);
 int aaudio_msg_read_get_device_list_response(struct aaudio_msg *msg, aaudio_device_id_t **dev_l, u64 *dev_cnt);
 
@@ -115,6 +131,7 @@ void aaudio_msg_write_property_listener(struct aaudio_msg *msg, aaudio_device_id
 void aaudio_msg_write_set_input_stream_address_ranges(struct aaudio_msg *msg, aaudio_device_id_t devid);
 void aaudio_msg_write_get_input_stream_list(struct aaudio_msg *msg, aaudio_device_id_t devid);
 void aaudio_msg_write_get_output_stream_list(struct aaudio_msg *msg, aaudio_device_id_t devid);
+void aaudio_msg_write_get_control_list(struct aaudio_msg *msg, aaudio_device_id_t devid);
 void aaudio_msg_write_set_remote_access(struct aaudio_msg *msg, u64 mode);
 void aaudio_msg_write_alive_notification(struct aaudio_msg *msg, u32 proto_ver, u32 msg_ver);
 void aaudio_msg_write_update_timestamp_response(struct aaudio_msg *msg);
@@ -138,6 +155,8 @@ int aaudio_cmd_get_input_stream_list(struct aaudio_device *a, struct aaudio_msg 
         aaudio_object_id_t **str_l, u64 *str_cnt);
 int aaudio_cmd_get_output_stream_list(struct aaudio_device *a, struct aaudio_msg *buf, aaudio_device_id_t devid,
         aaudio_object_id_t **str_l, u64 *str_cnt);
+int aaudio_cmd_get_control_list(struct aaudio_device *a, struct aaudio_msg *buf, aaudio_device_id_t devid,
+        aaudio_object_id_t **ctrl_l, u64 **elem_l, u64 **scope_l, u64 *ctrl_cnt);
 int aaudio_cmd_set_remote_access(struct aaudio_device *a, u64 mode);
 int aaudio_cmd_get_device_list(struct aaudio_device *a, struct aaudio_msg *buf,
         aaudio_device_id_t **dev_l, u64 *dev_cnt);
