@@ -471,6 +471,12 @@ static int bce_vhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev
     return 0;
 }
 
+/* add_endpoint/drop_endpoint apply immediately, so there is nothing staged
+ * to roll back; USB core calls this unconditionally when they fail. */
+static void bce_vhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
+{
+}
+
 static int bce_vhci_get_frame_number(struct usb_hcd *hcd)
 {
     return (int)(jiffies & 0x7FF);
@@ -1339,6 +1345,7 @@ static const struct hc_driver bce_vhci_driver = {
         .drop_endpoint = bce_vhci_drop_endpoint,
         .endpoint_reset = bce_vhci_endpoint_reset,
         .check_bandwidth = bce_vhci_check_bandwidth,
+        .reset_bandwidth = bce_vhci_reset_bandwidth,
         .get_frame_number = bce_vhci_get_frame_number,
         .bus_suspend = bce_vhci_bus_suspend,
         .bus_resume = bce_vhci_bus_resume
